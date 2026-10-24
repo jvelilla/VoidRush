@@ -33,7 +33,7 @@ _Static_assert(sizeof(vr_reactor_event_t) == 12, "vr_reactor_event_t must be 12 
 
 typedef struct vr_reactor vr_reactor_t;
 
-/* Metrics Snapshot (56 bytes) */
+/* Metrics Snapshot (88 bytes) */
 typedef struct {
     uint64_t active_connections;
     uint64_t accepts_total;
@@ -42,10 +42,15 @@ typedef struct {
     uint64_t bytes_in_total;
     uint64_t bytes_out_total;
     uint64_t idle_timeouts_total;
+    /* Phase 5 WebSocket metrics */
+    uint64_t ws_upgrades_total;
+    uint64_t ws_frames_in_total;
+    uint64_t ws_frames_out_total;
+    uint64_t ws_dropped_backpressure_total;
 } vr_reactor_metrics_t;
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(vr_reactor_metrics_t) == 56, "vr_reactor_metrics_t must be 56 bytes");
+_Static_assert(sizeof(vr_reactor_metrics_t) == 88, "vr_reactor_metrics_t must be 88 bytes");
 #endif
 
 /* Lifecycle */
@@ -100,7 +105,25 @@ void vr_reactor_metric_inc_stale(vr_reactor_t *r);
 void vr_reactor_metric_add_bytes_in(vr_reactor_t *r, uint64_t bytes);
 void vr_reactor_metric_add_bytes_out(vr_reactor_t *r, uint64_t bytes);
 void vr_reactor_metric_inc_idle_timeouts(vr_reactor_t *r);
+void vr_reactor_metric_inc_ws_upgrades(vr_reactor_t *r);
+void vr_reactor_metric_inc_ws_frames_in(vr_reactor_t *r);
+void vr_reactor_metric_inc_ws_frames_out(vr_reactor_t *r);
+void vr_reactor_metric_inc_ws_dropped(vr_reactor_t *r);
 void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out);
+
+/* Phase 5: WebSocket Crypto, Framing & Ref-Counted Broadcast Buffers */
+int    vr_ws_compute_accept_key(const char *client_key, size_t key_len, char *out_accept);
+void   vr_sha1(const uint8_t *data, size_t len, uint8_t out_digest[20]);
+size_t vr_base64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_cap);
+void   vr_ws_unmask(uint8_t *payload, size_t len, const uint8_t mask_key[4]);
+int    vr_ws_encode_frame_header(uint8_t fin_and_opcode, size_t payload_len, uint8_t out_hdr[10]);
+
+typedef struct vr_ws_msg vr_ws_msg_t;
+
+vr_ws_msg_t   *vr_ws_msg_create(uint8_t opcode, const void *payload, size_t len, int initial_refs);
+const uint8_t *vr_ws_msg_data(const vr_ws_msg_t *msg);
+size_t         vr_ws_msg_size(const vr_ws_msg_t *msg);
+void           vr_ws_msg_unref(vr_ws_msg_t *msg);
 
 #ifdef __cplusplus
 }

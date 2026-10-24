@@ -30,8 +30,8 @@ int main(void) {
     /* wake_fd should be consumed internally, returning 0 user events */
     assert(n == 0);
 
-    /* Test metrics */
-    assert(sizeof(vr_reactor_metrics_t) == 56);
+    /* Test metrics (88 bytes) */
+    assert(sizeof(vr_reactor_metrics_t) == 88);
     vr_reactor_metric_inc_accept(r);
     vr_reactor_metric_inc_open(r);
     vr_reactor_metric_inc_events(r, 5);
@@ -39,6 +39,11 @@ int main(void) {
     vr_reactor_metric_add_bytes_in(r, 1024);
     vr_reactor_metric_add_bytes_out(r, 2048);
     vr_reactor_metric_inc_idle_timeouts(r);
+    vr_reactor_metric_inc_ws_upgrades(r);
+    vr_reactor_metric_inc_ws_frames_in(r);
+    vr_reactor_metric_inc_ws_frames_out(r);
+    vr_reactor_metric_inc_ws_dropped(r);
+
     vr_reactor_metrics_t metrics;
     vr_reactor_get_metrics(r, &metrics);
     assert(metrics.accepts_total == 1);
@@ -48,6 +53,11 @@ int main(void) {
     assert(metrics.bytes_in_total == 1024);
     assert(metrics.bytes_out_total == 2048);
     assert(metrics.idle_timeouts_total == 1);
+    assert(metrics.ws_upgrades_total == 1);
+    assert(metrics.ws_frames_in_total == 1);
+    assert(metrics.ws_frames_out_total == 1);
+    assert(metrics.ws_dropped_backpressure_total == 1);
+
     vr_reactor_metric_dec_open(r);
     vr_reactor_get_metrics(r, &metrics);
     assert(metrics.active_connections == 0);
@@ -181,6 +191,88 @@ int main(void) {
     assert(res == 0);
 
     vr_reactor_destroy(r);
+
+    /* 7. Phase 5 WebSocket Crypto, Framing & Ref-Counted Buffers */
+    printf("[test_vr_reactor] 7. Testing WebSocket SHA-1, Base64, framing, and unmasking...\n");
+
+    /* 7a. RFC 6455 §1.3 Accept-Key Test Vector */
+    const char *rfc_client_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    char accept_out[32];
+    memset(accept_out, 0, sizeof(accept_out));
+    int accept_len = vr_ws_compute_accept_key(rfc_client_key, strlen(rfc_client_key), accept_out);
+    assert(accept_len == 28);
+    assert(strcmp(accept_out, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") == 0);
+
+    /* Test invalid inputs */
+    assert(vr_ws_compute_accept_key(NULL, 24, accept_out) == -1);
+    assert(vr_ws_compute_accept_key(rfc_client_key, 23, accept_out) == -1);
+    assert(vr_ws_compute_accept_key(rfc_client_key, 25, accept_out) == -1);
+    assert(vr_ws_compute_accept_key(rfc_client_key, 24, NULL) == -1);
+
+    /* 7b. Fast 64-bit XOR unmasking test (aligned and unaligned) */
+    uint8_t mask_key[4] = {0x12, 0x34, 0x56, 0x78};
+    uint8_t test_data[65];
+    uint8_t orig_data[65];
+    for (size_t i = 0; i < sizeof(test_data); i++) {
+        test_data[i] = (uint8_t)(i * 3 + 7);
+        orig_data[i] = test_data[i];
+    }
+    /* Unmask once -> mutates */
+    vr_ws_unmask(test_data, sizeof(test_data), mask_key);
+    assert(memcmp(test_data, orig_data, sizeof(test_data)) != 0);
+    /* Unmask twice with same key -> restores original */
+    vr_ws_unmask(test_data, sizeof(test_data), mask_key);
+    assert(memcmp(test_data, orig_data, sizeof(test_data)) == 0);
+
+    /* Test edge lengths for unmask: 0, 1, 3, 7, 8, 16 */
+    size_t edge_lens[] = {0, 1, 3, 7, 8, 16};
+    for (size_t e = 0; e < sizeof(edge_lens) / sizeof(edge_lens[0]); e++) {
+        size_t elen = edge_lens[e];
+        vr_ws_unmask(test_data, elen, mask_key);
+        vr_ws_unmask(test_data, elen, mask_key);
+        assert(memcmp(test_data, orig_data, elen) == 0);
+    }
+
+    /* 7c. Server unmasked frame header encoding */
+    uint8_t hdr[10];
+    int hlen;
+    /* Small (<126) */
+    hlen = vr_ws_encode_frame_header(0x81, 10, hdr);
+    assert(hlen == 2);
+    assert(hdr[0] == 0x81);
+    assert(hdr[1] == 10);
+
+    /* Medium (126..65535) */
+    hlen = vr_ws_encode_frame_header(0x82, 500, hdr);
+    assert(hlen == 4);
+    assert(hdr[0] == 0x82);
+    assert(hdr[1] == 126);
+    assert(hdr[2] == (500 >> 8));
+    assert(hdr[3] == (500 & 0xFF));
+
+    /* Large (>65535) */
+    hlen = vr_ws_encode_frame_header(0x81, 70000, hdr);
+    assert(hlen == 10);
+    assert(hdr[0] == 0x81);
+    assert(hdr[1] == 127);
+    assert(hdr[9] == (70000 & 0xFF));
+
+    /* 7d. Pre-framed ref-counted message buffer */
+    const char *msg_text = "VoidRush WebSockets";
+    size_t msg_len = strlen(msg_text);
+    vr_ws_msg_t *ws_msg = vr_ws_msg_create(0x1, msg_text, msg_len, 2);
+    assert(ws_msg != NULL);
+    assert(vr_ws_msg_size(ws_msg) == 2 + msg_len);
+    const uint8_t *mdata = vr_ws_msg_data(ws_msg);
+    assert(mdata != NULL);
+    assert(mdata[0] == 0x81);
+    assert(mdata[1] == (uint8_t)msg_len);
+    assert(memcmp(mdata + 2, msg_text, msg_len) == 0);
+
+    /* First unref decrements ref_count to 1 */
+    vr_ws_msg_unref(ws_msg);
+    /* Second unref frees the buffer */
+    vr_ws_msg_unref(ws_msg);
 
     printf("[test_vr_reactor] All native VR reactor unit tests passed successfully!\n");
     return 0;

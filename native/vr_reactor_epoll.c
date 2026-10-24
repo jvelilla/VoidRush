@@ -27,6 +27,10 @@ struct vr_reactor {
     uint64_t bytes_in_total;
     uint64_t bytes_out_total;
     uint64_t idle_timeouts_total;
+    uint64_t ws_upgrades_total;
+    uint64_t ws_frames_in_total;
+    uint64_t ws_frames_out_total;
+    uint64_t ws_dropped_backpressure_total;
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
 
@@ -351,6 +355,30 @@ void vr_reactor_metric_inc_idle_timeouts(vr_reactor_t *r) {
     }
 }
 
+void vr_reactor_metric_inc_ws_upgrades(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->ws_upgrades_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_ws_frames_in(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->ws_frames_in_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_ws_frames_out(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->ws_frames_out_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_ws_dropped(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->ws_dropped_backpressure_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
 void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
     if (r && out) {
         out->active_connections  = __atomic_load_n(&r->active_connections, __ATOMIC_RELAXED);
@@ -360,5 +388,9 @@ void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
         out->bytes_in_total       = __atomic_load_n(&r->bytes_in_total, __ATOMIC_RELAXED);
         out->bytes_out_total      = __atomic_load_n(&r->bytes_out_total, __ATOMIC_RELAXED);
         out->idle_timeouts_total  = __atomic_load_n(&r->idle_timeouts_total, __ATOMIC_RELAXED);
+        out->ws_upgrades_total    = __atomic_load_n(&r->ws_upgrades_total, __ATOMIC_RELAXED);
+        out->ws_frames_in_total   = __atomic_load_n(&r->ws_frames_in_total, __ATOMIC_RELAXED);
+        out->ws_frames_out_total  = __atomic_load_n(&r->ws_frames_out_total, __ATOMIC_RELAXED);
+        out->ws_dropped_backpressure_total = __atomic_load_n(&r->ws_dropped_backpressure_total, __ATOMIC_RELAXED);
     }
 }

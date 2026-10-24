@@ -21,6 +21,7 @@ feature {NONE} -- Initialization
 			create host_slice.make_empty
 			create x_forwarded_for_slice.make_empty
 			create x_forwarded_proto_slice.make_empty
+			create ws_key_slice.make_empty
 			reset
 		ensure
 			reset_done: method = Method_unknown and header_bytes_consumed = 0
@@ -61,6 +62,28 @@ feature -- Access
 	x_forwarded_proto_slice: VR_HTTP_SLICE
 			-- Value slice of X-Forwarded-Proto header, or empty if absent
 
+	is_upgrade_websocket: BOOLEAN
+			-- Has "Upgrade: websocket" header been parsed?
+
+	is_connection_upgrade: BOOLEAN
+			-- Does "Connection" header contain "upgrade" token?
+
+	ws_key_slice: VR_HTTP_SLICE
+			-- Value slice of Sec-WebSocket-Key header (must be 24 characters)
+
+	ws_version: INTEGER
+			-- Parsed Sec-WebSocket-Version (must be 13)
+
+	is_websocket_upgrade_request: BOOLEAN
+			-- Is this request a valid RFC 6455 WebSocket upgrade request?
+		do
+			Result := method = Method_get and
+			          is_upgrade_websocket and
+			          is_connection_upgrade and
+			          ws_key_slice.length = 24 and
+			          ws_version = 13
+		end
+
 feature -- State Management
 
 	reset
@@ -73,6 +96,10 @@ feature -- State Management
 			host_slice.reset
 			x_forwarded_for_slice.reset
 			x_forwarded_proto_slice.reset
+			is_upgrade_websocket := False
+			is_connection_upgrade := False
+			ws_key_slice.reset
+			ws_version := 0
 			version_minor := 1
 			is_keep_alive := True
 			content_length := 0
@@ -334,6 +361,26 @@ feature {NONE} -- Token Extraction
 				elseif v_slice.same_as_string (buf, "keep-alive") or v_slice.same_as_string (buf, "Keep-Alive") then
 					is_keep_alive := True
 				end
+				if v_slice.has_substring_case_insensitive (buf, "upgrade") then
+					is_connection_upgrade := True
+				end
+			-- Check "upgrade" (7 chars)
+			elseif name_len = 7 and then
+			       (buf.read_character (name_offset) = 'U' or buf.read_character (name_offset) = 'u') and then
+			       (buf.read_character (name_offset + 1) = 'P' or buf.read_character (name_offset + 1) = 'p') then
+				if v_slice.same_as_string_case_insensitive (buf, "websocket") then
+					is_upgrade_websocket := True
+				end
+			-- Check "sec-websocket-key" (17 chars)
+			elseif name_len = 17 and then
+			       (buf.read_character (name_offset) = 'S' or buf.read_character (name_offset) = 's') and then
+			       (buf.read_character (name_offset + 14) = 'K' or buf.read_character (name_offset + 14) = 'k') then
+				ws_key_slice := v_slice
+			-- Check "sec-websocket-version" (21 chars)
+			elseif name_len = 21 and then
+			       (buf.read_character (name_offset) = 'S' or buf.read_character (name_offset) = 's') and then
+			       (buf.read_character (name_offset + 14) = 'V' or buf.read_character (name_offset + 14) = 'v') then
+				ws_version := v_slice.to_integer (buf)
 			-- Check "host" (4 chars)
 			elseif name_len = 4 and then
 			       (buf.read_character (name_offset) = 'H' or buf.read_character (name_offset) = 'h') then

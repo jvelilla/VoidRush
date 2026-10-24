@@ -46,6 +46,18 @@ feature -- Access
 	idle_timeouts_total: NATURAL_64
 			-- Cumulative total connections closed due to idle or Slowloris timeout
 
+	ws_upgrades_total: NATURAL_64
+			-- Cumulative total successful WebSocket HTTP 101 upgrades
+
+	ws_frames_in_total: NATURAL_64
+			-- Cumulative total inbound WebSocket frames parsed
+
+	ws_frames_out_total: NATURAL_64
+			-- Cumulative total outbound WebSocket frames transmitted
+
+	ws_dropped_backpressure_total: NATURAL_64
+			-- Cumulative total frames dropped due to subscriber buffer backpressure
+
 feature -- Status Report
 
 	refresh (a_handle: POINTER)
@@ -64,6 +76,10 @@ feature -- Status Report
 			bytes_in_total := buf.read_natural_64 (32)
 			bytes_out_total := buf.read_natural_64 (40)
 			idle_timeouts_total := buf.read_natural_64 (48)
+			ws_upgrades_total := buf.read_natural_64 (56)
+			ws_frames_in_total := buf.read_natural_64 (64)
+			ws_frames_out_total := buf.read_natural_64 (72)
+			ws_dropped_backpressure_total := buf.read_natural_64 (80)
 		end
 
 feature -- Output
@@ -71,14 +87,18 @@ feature -- Output
 	out: STRING
 			-- Human-readable metrics snapshot.
 		do
-			create Result.make (192)
+			create Result.make (256)
 			Result.append ("Metrics [accepts=" + accepts_total.out)
 			Result.append (", active=" + active_connections.out)
 			Result.append (", events=" + events_total.out)
 			Result.append (", stale=" + stale_events.out)
 			Result.append (", bytes_in=" + bytes_in_total.out)
 			Result.append (", bytes_out=" + bytes_out_total.out)
-			Result.append (", idle_drops=" + idle_timeouts_total.out + "]")
+			Result.append (", idle_drops=" + idle_timeouts_total.out)
+			Result.append (", ws_upgrades=" + ws_upgrades_total.out)
+			Result.append (", ws_in=" + ws_frames_in_total.out)
+			Result.append (", ws_out=" + ws_frames_out_total.out)
+			Result.append (", ws_dropped=" + ws_dropped_backpressure_total.out + "]")
 		end
 
 end

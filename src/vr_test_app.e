@@ -51,7 +51,28 @@ feature {NONE} -- Initialization
 			io.put_string ("[vr_test_app] Testing end-to-end HTTP/1.1 oversize header 431 rejection...%N")
 			test_end_to_end_http_oversize_header
 
-			io.put_string ("[vr_test_app] All Eiffel Phase 3 and Phase 4 tests passed successfully!%N")
+			io.put_string ("[vr_test_app] Testing Phase 5 RFC 6455 crypto, framing, and unmasking...%N")
+			test_ws_accept_key
+
+			io.put_string ("[vr_test_app] Testing Phase 5 HTTP 101 WebSocket upgrade handshake and 400 rejection...%N")
+			test_end_to_end_ws_upgrade
+
+			io.put_string ("[vr_test_app] Testing Phase 5 WebSocket masked frame echo and unmasked rejection...%N")
+			test_end_to_end_ws_echo_and_mask_rejection
+
+			io.put_string ("[vr_test_app] Testing Phase 5 interleaved Ping control frame during message fragmentation...%N")
+			test_end_to_end_ws_interleaved_ping
+
+			io.put_string ("[vr_test_app] Testing Phase 5 multi-worker Pub/Sub room broadcast...%N")
+			test_end_to_end_ws_pubsub_broadcast
+
+			io.put_string ("[vr_test_app] Testing Phase 5 disconnect cleanup without ghost room deliveries...%N")
+			test_end_to_end_ws_disconnect_cleanup
+
+			io.put_string ("[vr_test_app] Testing Phase 5 WebSocket metrics and fast-path direct write...%N")
+			test_end_to_end_ws_metrics
+
+			io.put_string ("[vr_test_app] All Eiffel Phase 3, Phase 4, and Phase 5 tests passed successfully!%N")
 		end
 
 feature {NONE} -- Tests
@@ -627,6 +648,518 @@ feature {NONE} -- Tests
 
 			res := {VR_REACTOR_BRIDGE}.c_close (c1)
 			shutdown_reactor (r)
+		end
+
+	test_ws_accept_key
+			-- T5.1: Verify RFC 6455 accept key calculation, unmasking, and frame encoding via Eiffel FFI.
+		local
+			key_str: C_STRING
+			accept_buf: MANAGED_POINTER
+			len, i, hdr_len: INTEGER
+			accept_str: STRING_8
+			hdr_buf, data_buf, mask_buf: MANAGED_POINTER
+		do
+			create key_str.make ("dGhlIHNhbXBsZSBub25jZQ==")
+			create accept_buf.make (32)
+			len := {VR_REACTOR_BRIDGE}.c_ws_compute_accept_key (key_str.item, key_str.count, accept_buf.item)
+			check accept_len_ok: len = 28 end
+			create accept_str.make (28)
+			from i := 0 until i >= 28 loop
+				accept_str.append_character (accept_buf.read_character (i))
+				i := i + 1
+			end
+			check accept_matches_vector: accept_str.same_string ("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") end
+
+			-- Header encoding: 0-125 bytes
+			create hdr_buf.make (16)
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_text).to_natural_8, 10, hdr_buf.item)
+			check hdr_small_len: hdr_len = 2 end
+			check hdr_b0: hdr_buf.read_natural_8 (0) = 0x81 end
+			check hdr_b1: hdr_buf.read_natural_8 (1) = 10 end
+
+			-- Header encoding: 126-65535 bytes
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_binary).to_natural_8, 1000, hdr_buf.item)
+			check hdr_med_len: hdr_len = 4 end
+			check hdr_med_b0: hdr_buf.read_natural_8 (0) = 0x82 end
+			check hdr_med_b1: hdr_buf.read_natural_8 (1) = 126 end
+			check hdr_med_payload: hdr_buf.read_natural_16_be (2) = 1000 end
+
+			-- Header encoding: >65535 bytes
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_binary).to_natural_8, 70000, hdr_buf.item)
+			check hdr_large_len: hdr_len = 10 end
+			check hdr_large_b0: hdr_buf.read_natural_8 (0) = 0x82 end
+			check hdr_large_b1: hdr_buf.read_natural_8 (1) = 127 end
+			check hdr_large_payload: hdr_buf.read_natural_64_be (2) = (70000).to_natural_64 end
+
+			-- In-place unmask test
+			create data_buf.make (4)
+			create mask_buf.make (4)
+			mask_buf.put_natural_8 (0x12, 0)
+			mask_buf.put_natural_8 (0x34, 1)
+			mask_buf.put_natural_8 (0x56, 2)
+			mask_buf.put_natural_8 (0x78, 3)
+			data_buf.put_natural_8 (0x12, 0)
+			data_buf.put_natural_8 (0x34, 1)
+			data_buf.put_natural_8 (0x56, 2)
+			data_buf.put_natural_8 (0x78, 3)
+			{VR_REACTOR_BRIDGE}.c_ws_unmask (data_buf.item, 4, mask_buf.item)
+			check unmasked_zero: data_buf.read_natural_8 (0) = 0 and data_buf.read_natural_8 (1) = 0 and data_buf.read_natural_8 (2) = 0 and data_buf.read_natural_8 (3) = 0 end
+		end
+
+	test_end_to_end_ws_upgrade
+			-- T5.2: Verify HTTP 101 WebSocket upgrade handshake and 400 rejection.
+		local
+			r: separate VR_REACTOR
+			c1, c2, res, i: INTEGER
+			m: VR_METRICS
+			resp1, resp2: STRING_8
+		do
+			create r.make (Test_port + 7, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			-- Client 1: valid upgrade
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 7)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			from i := 0 until i >= 20 or (m.accepts_total >= 1 and m.active_connections >= 1) loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+			check c1_accepted: m.accepts_total >= 1 end
+
+			send_ws_upgrade (c1, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			resp1 := read_response_str (c1, r, 50)
+			check got_101: resp1.has_substring ("HTTP/1.1 101 Switching Protocols") end
+			check got_upgrade_hdr: resp1.has_substring ("Upgrade: websocket") end
+			check got_conn_hdr: resp1.has_substring ("Connection: Upgrade") end
+			check got_accept_hdr: resp1.has_substring ("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") end
+
+			-- Client 2: invalid upgrade (bad version 12)
+			c2 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 7)
+			check c2_connected: c2 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c2)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_ws_upgrade (c2, "dGhlIHNhbXBsZSBub25jZQ==", "12")
+			resp2 := read_response_str (c2, r, 20)
+			check got_400: resp2.has_substring ("400 Bad Request") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			res := {VR_REACTOR_BRIDGE}.c_close (c2)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_ws_echo_and_mask_rejection
+			-- T5.3: Verify client masked frame echoes unmasked; unmasked frame triggers 1002 Close.
+		local
+			r: separate VR_REACTOR
+			c1, res, i, n: INTEGER
+			m: VR_METRICS
+			resp_upgrade: STRING_8
+			recv_buf: MANAGED_POINTER
+			payload_out: STRING_8
+		do
+			create r.make (Test_port + 8, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 8)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 1 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_ws_upgrade (c1, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			resp_upgrade := read_response_str (c1, r, 50)
+			check upgrade_ok: resp_upgrade.has_substring ("101 Switching Protocols") end
+
+			-- Send masked text frame: "Hello WebSocket!" (16 bytes)
+			send_client_ws_frame (c1, True, Ws_opcode_text, "Hello WebSocket!", True)
+
+			create recv_buf.make (256)
+			n := read_response_bytes (c1, r, recv_buf, 18)
+			check echo_read: n >= 18 end
+			check echo_b0: recv_buf.read_natural_8 (0) = 0x81 end
+			check echo_b1: recv_buf.read_natural_8 (1) = 16 end
+			create payload_out.make (16)
+			from i := 0 until i >= 16 loop
+				payload_out.append_character (recv_buf.read_character (2 + i))
+				i := i + 1
+			end
+			check echo_payload_ok: payload_out.same_string ("Hello WebSocket!") end
+
+			-- Send UNMASKED client frame: protocol error per RFC 6455 §5.1
+			send_client_ws_frame (c1, True, Ws_opcode_text, "unmasked_error", False)
+
+			create recv_buf.make (256)
+			n := read_response_bytes (c1, r, recv_buf, 4)
+			check close_read: n >= 4 end
+			check close_b0: recv_buf.read_natural_8 (0) = 0x88 end
+			check close_b1: recv_buf.read_natural_8 (1) = 2 end
+			check close_code_1002: recv_buf.read_natural_16_be (2) = Ws_close_protocol_error end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_ws_interleaved_ping
+			-- T5.4: Interleaved Ping during message fragmentation receives immediate Pong without corrupting frag_buf.
+		local
+			r: separate VR_REACTOR
+			c1, res, i, n: INTEGER
+			m: VR_METRICS
+			resp_upgrade: STRING_8
+			recv_buf: MANAGED_POINTER
+			pong_payload, final_payload: STRING_8
+		do
+			create r.make (Test_port + 9, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 9)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 1 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_ws_upgrade (c1, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			resp_upgrade := read_response_str (c1, r, 50)
+			check upgrade_ok: resp_upgrade.has_substring ("101 Switching Protocols") end
+
+			-- 1. Send fragment 1: FIN=0, text opcode, payload "Part1_"
+			send_client_ws_frame (c1, False, Ws_opcode_text, "Part1_", True)
+
+			-- 2. Interleave Ping: FIN=1, ping opcode, payload "myping"
+			send_client_ws_frame (c1, True, Ws_opcode_ping, "myping", True)
+
+			-- 3. Verify Pong received immediately
+			create recv_buf.make (256)
+			n := read_response_bytes (c1, r, recv_buf, 8)
+			check pong_read: n >= 8 end
+			check pong_b0: recv_buf.read_natural_8 (0) = 0x8A end
+			check pong_b1: recv_buf.read_natural_8 (1) = 6 end
+			create pong_payload.make (6)
+			from i := 0 until i >= 6 loop
+				pong_payload.append_character (recv_buf.read_character (2 + i))
+				i := i + 1
+			end
+			check pong_payload_ok: pong_payload.same_string ("myping") end
+
+			-- 4. Send fragment 2: FIN=1, continuation opcode, payload "Part2_Done"
+			send_client_ws_frame (c1, True, Ws_opcode_continuation, "Part2_Done", True)
+
+			-- 5. Verify reassembled message echo: "Part1_Part2_Done" (16 bytes)
+			create recv_buf.make (256)
+			n := read_response_bytes (c1, r, recv_buf, 18)
+			check reassembled_read: n >= 18 end
+			check echo_b0: recv_buf.read_natural_8 (0) = 0x81 end
+			check echo_b1: recv_buf.read_natural_8 (1) = 16 end
+			create final_payload.make (16)
+			from i := 0 until i >= 16 loop
+				final_payload.append_character (recv_buf.read_character (2 + i))
+				i := i + 1
+			end
+			check reassembled_matches: final_payload.same_string ("Part1_Part2_Done") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_ws_pubsub_broadcast
+			-- T5.5: Multi-worker Pub/Sub broadcast via VR_BROKER with "PUB " command prefix.
+		local
+			r: separate VR_REACTOR
+			c1, c2, res, i, n: INTEGER
+			m: VR_METRICS
+			recv_buf: MANAGED_POINTER
+			broadcast_msg: STRING_8
+		do
+			create r.make (Test_port + 10, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 10)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			c2 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 10)
+			check c2_connected: c2 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c2)
+
+			from i := 0 until i >= 30 or m.accepts_total >= 2 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+			check two_accepted: m.accepts_total >= 2 end
+
+			-- Upgrade both to WebSocket
+			send_ws_upgrade (c1, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			send_ws_upgrade (c2, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			broadcast_msg := read_response_str (c1, r, 50)
+			broadcast_msg := read_response_str (c2, r, 50)
+
+			-- Client 1 publishes message: "PUB BroadcastToAll!" (19 bytes, payload without "PUB " is 15 bytes)
+			send_client_ws_frame (c1, True, Ws_opcode_text, "PUB BroadcastToAll!", True)
+
+			-- Client 2 must receive broadcast frame with "BroadcastToAll!" (15 bytes)
+			create recv_buf.make (256)
+			n := read_response_bytes (c2, r, recv_buf, 17)
+			check c2_got_broadcast: n >= 17 end
+			check c2_b0: recv_buf.read_natural_8 (0) = 0x81 end
+			check c2_b1: recv_buf.read_natural_8 (1) = 15 end
+			create broadcast_msg.make (15)
+			from i := 0 until i >= 15 loop
+				broadcast_msg.append_character (recv_buf.read_character (2 + i))
+				i := i + 1
+			end
+			check payload_ok: broadcast_msg.same_string ("BroadcastToAll!") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			res := {VR_REACTOR_BRIDGE}.c_close (c2)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_ws_disconnect_cleanup
+			-- T5.6: Disconnect cleanup purges worker room tables immediately without ghost deliveries.
+		local
+			r: separate VR_REACTOR
+			c1, c2, res, i, n: INTEGER
+			m: VR_METRICS
+			recv_buf: MANAGED_POINTER
+			broadcast_msg: STRING_8
+		do
+			create r.make (Test_port + 11, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 11)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			c2 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 11)
+			check c2_connected: c2 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c2)
+
+			from i := 0 until i >= 30 or m.accepts_total >= 2 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			-- Upgrade both
+			send_ws_upgrade (c1, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			send_ws_upgrade (c2, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			broadcast_msg := read_response_str (c1, r, 50)
+			broadcast_msg := read_response_str (c2, r, 50)
+
+			-- Now client 2 abruptly disconnects
+			res := {VR_REACTOR_BRIDGE}.c_close (c2)
+
+			-- Step reactor so worker detects EOF and removes c2 from room lists
+			from i := 0 until i >= 10 loop
+				step_reactor (r, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (10)
+				i := i + 1
+			end
+
+			-- Client 1 publishes another message: "PUB StillHere!" (14 bytes, payload 10 bytes)
+			send_client_ws_frame (c1, True, Ws_opcode_text, "PUB StillHere!", True)
+
+			-- Client 1 receives the broadcast
+			create recv_buf.make (256)
+			n := read_response_bytes (c1, r, recv_buf, 12)
+			check c1_got_broadcast: n >= 12 end
+			check c1_b0: recv_buf.read_natural_8 (0) = 0x81 end
+			check c1_b1: recv_buf.read_natural_8 (1) = 10 end
+			create broadcast_msg.make (10)
+			from i := 0 until i >= 10 loop
+				broadcast_msg.append_character (recv_buf.read_character (2 + i))
+				i := i + 1
+			end
+			check payload_ok: broadcast_msg.same_string ("StillHere!") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_ws_metrics
+			-- T5.7: Verify atomic WebSocket metrics tracking and direct write fast path.
+		local
+			r: separate VR_REACTOR
+			c1, res, i: INTEGER
+			m: VR_METRICS
+			recv_buf: MANAGED_POINTER
+			resp_upgrade: STRING_8
+			n: INTEGER
+		do
+			create r.make (Test_port + 12, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 12)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 1 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_ws_upgrade (c1, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			resp_upgrade := read_response_str (c1, r, 50)
+			check upgrade_ok: resp_upgrade.has_substring ("101 Switching Protocols") end
+
+			send_client_ws_frame (c1, True, Ws_opcode_text, "MetricCheck", True)
+			create recv_buf.make (256)
+			n := read_response_bytes (c1, r, recv_buf, 13)
+			check echo_read: n >= 13 end
+
+			m.refresh (get_native_handle (r))
+			check ws_upgrades_tracked: m.ws_upgrades_total >= 1 end
+			check ws_in_tracked: m.ws_frames_in_total >= 1 end
+			check ws_out_tracked: m.ws_frames_out_total >= 1 end
+			check ws_no_dropped: m.ws_dropped_backpressure_total = 0 end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			shutdown_reactor (r)
+		end
+
+feature {NONE} -- WebSocket Test Helpers
+
+	send_ws_upgrade (a_sock: INTEGER; a_key: STRING_8; a_version: STRING_8)
+			-- Send HTTP/1.1 WebSocket Upgrade request.
+		local
+			req: STRING_8
+			cs: C_STRING
+			res: INTEGER
+		do
+			create req.make (256)
+			req.append ("GET /ws HTTP/1.1%R%NHost: localhost%R%NUpgrade: websocket%R%NConnection: Upgrade%R%N")
+			if not a_key.is_empty then
+				req.append ("Sec-WebSocket-Key: ")
+				req.append (a_key)
+				req.append ("%R%N")
+			end
+			if not a_version.is_empty then
+				req.append ("Sec-WebSocket-Version: ")
+				req.append (a_version)
+				req.append ("%R%N")
+			end
+			req.append ("%R%N")
+			create cs.make (req)
+			res := {VR_REACTOR_BRIDGE}.c_send (a_sock, cs.item, cs.count)
+			check sent_upgrade: res = cs.count end
+		end
+
+	send_client_ws_frame (a_sock: INTEGER; a_fin: BOOLEAN; a_opcode: INTEGER; a_payload: STRING_8; a_masked: BOOLEAN)
+			-- Transmit client frame with or without masking.
+		local
+			buf: MANAGED_POINTER
+			b0, b1: NATURAL_8
+			total_len, i, res: INTEGER
+		do
+			b0 := (if a_fin then 0x80 else 0 end | a_opcode).to_natural_8
+			if a_masked then
+				b1 := (0x80 | a_payload.count).to_natural_8
+				total_len := 2 + 4 + a_payload.count
+				create buf.make (total_len)
+				buf.put_natural_8 (b0, 0)
+				buf.put_natural_8 (b1, 1)
+				buf.put_natural_8 (0x12, 2)
+				buf.put_natural_8 (0x34, 3)
+				buf.put_natural_8 (0x56, 4)
+				buf.put_natural_8 (0x78, 5)
+
+				from i := 1 until i > a_payload.count loop
+					buf.put_character (a_payload.item (i), 6 + i - 1)
+					i := i + 1
+				end
+
+				if a_payload.count > 0 then
+					{VR_REACTOR_BRIDGE}.c_ws_unmask (buf.item + 6, a_payload.count, buf.item + 2)
+				end
+			else
+				b1 := a_payload.count.to_natural_8
+				total_len := 2 + a_payload.count
+				create buf.make (total_len)
+				buf.put_natural_8 (b0, 0)
+				buf.put_natural_8 (b1, 1)
+				from i := 1 until i > a_payload.count loop
+					buf.put_character (a_payload.item (i), 2 + i - 1)
+					i := i + 1
+				end
+			end
+			res := {VR_REACTOR_BRIDGE}.c_send (a_sock, buf.item, total_len)
+			check sent_frame_ok: res = total_len end
+		end
+
+	read_response_str (a_sock: INTEGER; r: separate VR_REACTOR; a_min_bytes: INTEGER): STRING_8
+			-- Step reactor and drain up to a_min_bytes from a_sock, returning string.
+		local
+			recv_buf: MANAGED_POINTER
+			i, n, total_read: INTEGER
+		do
+			create recv_buf.make (2048)
+			from
+				i := 0
+				total_read := 0
+			until
+				i >= 40 or total_read >= a_min_bytes
+			loop
+				step_reactor (r, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (10)
+				n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_sock, recv_buf.item + total_read, 2048 - total_read)
+				if n > 0 then
+					total_read := total_read + n
+				end
+				i := i + 1
+			end
+			if total_read > 0 then
+				recv_buf.put_integer_8 (0, total_read)
+				Result := (create {C_STRING}.make_by_pointer (recv_buf.item)).string
+			else
+				create Result.make_empty
+			end
+		end
+
+	read_response_bytes (a_sock: INTEGER; r: separate VR_REACTOR; a_buf: MANAGED_POINTER; a_min_bytes: INTEGER): INTEGER
+			-- Step reactor and drain into a_buf, returning total bytes read.
+		local
+			i, n, total_read: INTEGER
+		do
+			from
+				i := 0
+				total_read := 0
+			until
+				i >= 40 or total_read >= a_min_bytes
+			loop
+				step_reactor (r, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (10)
+				n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_sock, a_buf.item + total_read, a_buf.count - total_read)
+				if n > 0 then
+					total_read := total_read + n
+				end
+				i := i + 1
+			end
+			Result := total_read
 		end
 
 feature {NONE} -- SCOOP Helpers

@@ -328,12 +328,136 @@ feature -- Atomic Metrics
 			instance_free: class
 		end
 
+	c_metric_inc_ws_upgrades (r: POINTER)
+			-- Increment total WebSocket upgrades counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_ws_upgrades((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_ws_frames_in (r: POINTER)
+			-- Increment total inbound WebSocket frames counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_ws_frames_in((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_ws_frames_out (r: POINTER)
+			-- Increment total outbound WebSocket frames counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_ws_frames_out((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_ws_dropped (r: POINTER)
+			-- Increment total frames dropped due to subscriber buffer backpressure.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_ws_dropped((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
 	c_reactor_get_metrics (r, out_buf: POINTER)
-			-- Snapshot metrics into `out_buf` (must be at least 56 bytes).
+			-- Snapshot metrics into `out_buf` (must be at least 88 bytes).
 		external
 			"C inline use %"vr_reactor_bridge.h%""
 		alias
 			"vr_reactor_get_metrics((const vr_reactor_t *) $r, (vr_reactor_metrics_t *) $out_buf);"
+		ensure
+			instance_free: class
+		end
+
+feature -- Phase 5 WebSocket Primitives
+
+	c_ws_compute_accept_key (client_key: POINTER; key_len: INTEGER; out_accept: POINTER): INTEGER
+			-- Compute RFC 6455 Sec-WebSocket-Accept token into `out_accept` (min 29 bytes).
+			-- Returns 28 on success, -1 on invalid input.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_ws_compute_accept_key((const char *) $client_key, (size_t) $key_len, (char *) $out_accept);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_unmask (payload: POINTER; len: INTEGER; mask_key: POINTER)
+			-- Fast 64-bit word-aligned in-place XOR unmasking.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_ws_unmask((uint8_t *) $payload, (size_t) $len, (const uint8_t *) $mask_key);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_encode_frame_header (fin_and_opcode: NATURAL_8; payload_len: INTEGER; out_hdr: POINTER): INTEGER
+			-- Encode unmasked server frame header (2, 4, or 10 bytes).
+			-- Returns header length in bytes.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_ws_encode_frame_header((uint8_t) $fin_and_opcode, (size_t) $payload_len, (uint8_t *) $out_hdr);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_msg_create (opcode: INTEGER; payload: POINTER; len, initial_refs: INTEGER): POINTER
+			-- Allocate immutable reference-counted pre-framed WebSocket message buffer.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_POINTER) vr_ws_msg_create((uint8_t) $opcode, (const void *) $payload, (size_t) $len, (int) $initial_refs);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_msg_data (msg: POINTER): POINTER
+			-- Pointer to pre-framed raw bytes (header + payload).
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_POINTER) vr_ws_msg_data((const vr_ws_msg_t *) $msg);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_msg_size (msg: POINTER): INTEGER
+			-- Total byte size of pre-framed message.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_ws_msg_size((const vr_ws_msg_t *) $msg);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_msg_unref (msg: POINTER)
+			-- Decrement atomic reference counter, freeing memory when count reaches 0.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_ws_msg_unref((vr_ws_msg_t *) $msg);"
+		ensure
+			instance_free: class
+		end
+
+	c_has_pub_prefix (ptr: POINTER; len: INTEGER): BOOLEAN
+			-- Does memory slice begin with ASCII "PUB "?
+		external
+			"C inline"
+		alias
+			"return (EIF_BOOLEAN) ($len >= 4 && ((const char *)$ptr)[0] == 'P' && ((const char *)$ptr)[1] == 'U' && ((const char *)$ptr)[2] == 'B' && ((const char *)$ptr)[3] == ' ');"
 		ensure
 			instance_free: class
 		end

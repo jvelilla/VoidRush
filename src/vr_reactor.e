@@ -27,14 +27,16 @@ feature {NONE} -- Initialization
 
 			create events.make (Max_events)
 			create workers.make_empty (worker_count)
+			create broker.make
 
 			from
 				i := 0
 			until
 				i >= worker_count
 			loop
-				create w.make (i, handle)
+				create w.make (i, handle, broker, worker_count)
 				workers.extend (w)
+				dispatch_register_worker (broker, w)
 				i := i + 1
 			end
 
@@ -209,7 +211,10 @@ feature {NONE} -- Teardown & Barriers
 				i := i + 1
 			end
 
-			-- 4. Destroy native reactor memory once all workers are confirmed idle
+			-- 4. Workers drained; safely terminate pub/sub broker
+			dispatch_broker_shutdown (broker)
+
+			-- 5. Destroy native reactor memory once all workers are confirmed idle
 			if handle /= default_pointer then
 				{VR_REACTOR_BRIDGE}.c_reactor_destroy (handle)
 				handle := default_pointer
@@ -256,6 +261,18 @@ feature {NONE} -- SCOOP Controlled Dispatch Helpers
 			Result := a_worker.is_shutdown_complete
 		end
 
+	dispatch_broker_shutdown (a_broker: separate VR_BROKER)
+			-- Asynchronous shutdown command to controlled broker argument.
+		do
+			a_broker.shutdown
+		end
+
+	dispatch_register_worker (a_broker: separate VR_BROKER; a_worker: separate VR_WORKER)
+			-- Asynchronous registration command to controlled broker argument.
+		do
+			a_broker.register_worker (a_worker)
+		end
+
 feature {NONE} -- Implementation
 
 	accept_pending_connections
@@ -294,6 +311,7 @@ feature {NONE} -- Implementation
 	listen_fd: INTEGER
 	events: VR_REACTOR_EVENT_BUFFER
 	workers: SPECIAL [separate VR_WORKER]
+	broker: separate VR_BROKER
 	next_generation: NATURAL_32
 	last_tick_ms: NATURAL_64
 

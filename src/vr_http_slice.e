@@ -90,6 +90,84 @@ feature -- Comparison & Conversion
 			end
 		end
 
+	same_as_string_case_insensitive (buf: MANAGED_POINTER; str: STRING_8): BOOLEAN
+			-- Does byte slice in `buf` match ASCII `str` ignoring case?
+		require
+			valid_buf: buf /= Void
+			valid_str: str /= Void
+		local
+			i: INTEGER
+			matches: BOOLEAN
+			c1, c2: CHARACTER
+		do
+			if length /= str.count then
+				Result := False
+			else
+				matches := True
+				from
+					i := 1
+				invariant
+					valid_i: i >= 1 and i <= length + 1
+				until
+					not matches or i > length
+				loop
+					c1 := buf.read_character (offset + i - 1).as_lower
+					c2 := str.item (i).as_lower
+					if c1 /= c2 then
+						matches := False
+					end
+					i := i + 1
+				variant
+					remaining: length + 1 - i
+				end
+				Result := matches
+			end
+		end
+
+	has_substring_case_insensitive (buf: MANAGED_POINTER; token: STRING_8): BOOLEAN
+			-- Does byte slice in `buf` contain ASCII substring `token` ignoring case?
+		require
+			valid_buf: buf /= Void
+			valid_token: token /= Void
+		local
+			i, j: INTEGER
+			matched: BOOLEAN
+		do
+			if length < token.count or token.count = 0 then
+				Result := False
+			else
+				from
+					i := 0
+				invariant
+					valid_i: i >= 0 and i <= length + 1
+				until
+					Result or (i + token.count > length)
+				loop
+					matched := True
+					from
+						j := 1
+					invariant
+						valid_j: j >= 1 and j <= token.count + 1
+					until
+						not matched or (j > token.count)
+					loop
+						if buf.read_character (offset + i + j - 1).as_lower /= token.item (j).as_lower then
+							matched := False
+						end
+						j := j + 1
+					variant
+						rem_j: token.count + 1 - j
+					end
+					if matched then
+						Result := True
+					end
+					i := i + 1
+				variant
+					remaining_i: length - token.count + 1 - i
+				end
+			end
+		end
+
 	starts_with (buf: MANAGED_POINTER; prefix: STRING_8): BOOLEAN
 			-- Does byte slice in `buf` begin with `prefix`?
 		require

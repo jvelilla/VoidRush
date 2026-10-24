@@ -83,6 +83,41 @@ feature -- Protocol Sub-States (Phase 4)
 	Proto_http_reading_body: INTEGER = 3
 			-- Reading HTTP/1.1 request body (Content-Length)
 
+	Proto_ws_open: INTEGER = 4
+			-- Full-duplex RFC 6455 WebSocket framing
+
+	Proto_ws_closing: INTEGER = 5
+			-- Awaiting or sending terminal WebSocket Close frame
+
+feature -- WebSocket Opcodes (RFC 6455 §5.2)
+
+	Ws_opcode_continuation: INTEGER = 0x0
+	Ws_opcode_text: INTEGER = 0x1
+	Ws_opcode_binary: INTEGER = 0x2
+	Ws_opcode_close: INTEGER = 0x8
+	Ws_opcode_ping: INTEGER = 0x9
+	Ws_opcode_pong: INTEGER = 0xA
+
+feature -- WebSocket Status Codes (RFC 6455 §7.4.1)
+
+	Ws_close_normal: NATURAL_16 = 1000
+	Ws_close_going_away: NATURAL_16 = 1001
+	Ws_close_protocol_error: NATURAL_16 = 1002
+	Ws_close_unsupported_data: NATURAL_16 = 1003
+	Ws_close_message_too_big: NATURAL_16 = 1009
+	Ws_close_internal_error: NATURAL_16 = 1011
+
+feature -- WebSocket Limits
+
+	Max_ws_message_size: INTEGER = 1048576
+			-- 1 MiB maximum frame and fragmented message payload
+
+	Max_ws_control_payload: INTEGER = 125
+			-- RFC 6455 limit for Ping/Pong/Close payloads
+
+	Room_default: INTEGER = 0
+			-- Default broadcast room
+
 feature -- HTTP Methods
 
 	Method_unknown: INTEGER = 0
@@ -118,7 +153,7 @@ feature -- Buffer and Pool Configuration
 	Default_backlog: INTEGER = 1024
 			-- Default TCP listen queue backlog
 
-	Metrics_size: INTEGER = 56
-			-- Size in bytes of vr_reactor_metrics_t (7 * uint64_t)
+	Metrics_size: INTEGER = 88
+			-- Size in bytes of vr_reactor_metrics_t (11 * uint64_t)
 
 end

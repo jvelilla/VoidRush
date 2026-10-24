@@ -68,6 +68,10 @@ feature {NONE} -- Initialization
 
 			create http_parser.make
 			create proxy_parser.make
+			create ws_parser.make
+			create rooms.make (4)
+			frag_bytes := 0
+			frag_opcode := 0
 			client_ip := "127.0.0.1"
 			client_port := 0
 		ensure
@@ -115,6 +119,30 @@ feature -- Access
 	proxy_parser: VR_PROXY_V2
 			-- Binary PROXY Protocol v2 preface parser
 
+	ws_parser: VR_WS_PARSER
+			-- Incremental zero-allocation RFC 6455 WebSocket frame parser
+
+	frag_buf: detachable MANAGED_POINTER
+			-- Lazy accumulation buffer for fragmented WebSocket messages
+
+	frag_bytes: INTEGER
+			-- Accumulated byte count in frag_buf
+
+	frag_opcode: INTEGER
+			-- In-progress fragmented data frame opcode (0x1 text or 0x2 binary)
+
+	rooms: ARRAYED_SET [INTEGER]
+			-- Room subscriptions for this connection
+
+	broadcast_handler: detachable PROCEDURE [INTEGER, INTEGER, POINTER, INTEGER]
+			-- Callback into worker to broadcast message across workers (room, opcode, ptr, len)
+
+	room_join_handler: detachable PROCEDURE [INTEGER, INTEGER]
+			-- Callback into worker when socket joins a room (fd, room)
+
+	reactor_handle: POINTER
+			-- Native reactor handle for atomic metrics updates
+
 	in_buf_bytes: INTEGER
 			-- Number of unparsed bytes sitting in inbound buffer
 		do
@@ -155,6 +183,12 @@ feature -- Status Report
 			Result := state = State_open
 		end
 
+	is_ws_open: BOOLEAN
+			-- Is connection in active WebSocket full-duplex framing mode?
+		do
+			Result := (state = State_open) and (proto_state = Proto_ws_open)
+		end
+
 	is_closing: BOOLEAN
 			-- Is connection draining remaining outbound writes before closure?
 		do
@@ -165,6 +199,12 @@ feature -- Status Report
 			-- Has connection transitioned to closed?
 		do
 			Result := state = State_closed
+		end
+
+	is_in_room (a_room_id: INTEGER): BOOLEAN
+			-- Is connection registered in room `a_room_id`?
+		do
+			Result := rooms.has (a_room_id)
 		end
 
 	is_idle (a_now_ms: NATURAL_64; a_timeout_ms: NATURAL_64): BOOLEAN
@@ -209,6 +249,54 @@ feature -- State Modifiers
 			proto_state := a_proto
 		ensure
 			proto_set: proto_state = a_proto
+		end
+
+	register_room (a_room_id: INTEGER)
+			-- Record that this connection joined `a_room_id`.
+		require
+			valid_room: a_room_id >= 0
+		do
+			rooms.extend (a_room_id)
+		ensure
+			registered: rooms.has (a_room_id)
+		end
+
+	unregister_room (a_room_id: INTEGER)
+			-- Record that this connection left `a_room_id`.
+		require
+			valid_room: a_room_id >= 0
+		do
+			rooms.prune (a_room_id)
+		ensure
+			unregistered: not rooms.has (a_room_id)
+		end
+
+	set_broadcast_handler (a_handler: PROCEDURE [INTEGER, INTEGER, POINTER, INTEGER])
+			-- Set worker callback for fanning out broadcasts.
+		require
+			valid_handler: a_handler /= Void
+		do
+			broadcast_handler := a_handler
+		ensure
+			handler_set: broadcast_handler = a_handler
+		end
+
+	set_room_join_handler (a_handler: PROCEDURE [INTEGER, INTEGER])
+			-- Set worker callback for joining rooms.
+		require
+			valid_handler: a_handler /= Void
+		do
+			room_join_handler := a_handler
+		ensure
+			handler_set: room_join_handler = a_handler
+		end
+
+	set_reactor_handle (a_handle: POINTER)
+			-- Associate native reactor handle for metrics tracking.
+		do
+			reactor_handle := a_handle
+		ensure
+			handle_set: reactor_handle = a_handle
 		end
 
 	touch (a_now_ms: NATURAL_64)
@@ -302,19 +390,28 @@ feature {NONE} -- Inbound Protocol Pipeline
 							in_write_offset := 0
 						end
 
-						handle_http_request (a_now_ms)
-
-						if not http_parser.is_keep_alive then
-							mark_closing
-							done := True
-						else
-							-- Reset Slowloris deadline for next pipelined request
-							if in_buf_bytes = 0 then
-								request_started_ms := 0
-							else
-								request_started_ms := a_now_ms
+						if http_parser.is_upgrade_websocket or http_parser.is_connection_upgrade then
+							process_websocket_upgrade (a_now_ms)
+							if proto_state = Proto_ws_open and in_buf_bytes > 0 then
+								-- CRITICAL TRAP D FIX: Process pipelined WebSocket frames immediately!
+								process_websocket_frames (a_now_ms)
 							end
-							http_parser.reset
+							done := (proto_state /= Proto_ws_open)
+						else
+							handle_http_request (a_now_ms)
+
+							if not http_parser.is_keep_alive then
+								mark_closing
+								done := True
+							else
+								-- Reset Slowloris deadline for next pipelined request
+								if in_buf_bytes = 0 then
+									request_started_ms := 0
+								else
+									request_started_ms := a_now_ms
+								end
+								http_parser.reset
+							end
 						end
 					else
 						-- Headers not yet complete
@@ -324,10 +421,211 @@ feature {NONE} -- Inbound Protocol Pipeline
 						end
 						done := True
 					end
+				elseif proto_state = Proto_ws_open then
+					process_websocket_frames (a_now_ms)
+					done := True
 				else
 					done := True
 				end
 			end
+		end
+
+	process_websocket_upgrade (a_now_ms: NATURAL_64)
+			-- Validate WebSocket upgrade request, compute accept key, and transition to Proto_ws_open.
+		local
+			accept_buf: MANAGED_POINTER
+			res, i, key_offset: INTEGER
+			resp: STRING_8
+		do
+			if http_parser.is_websocket_upgrade_request then
+				create accept_buf.make (32)
+				key_offset := http_parser.ws_key_slice.offset
+				res := {VR_REACTOR_BRIDGE}.c_ws_compute_accept_key (in_buf.item + key_offset, 24, accept_buf.item)
+				if res = 28 then
+					create resp.make (160)
+					resp.append ("HTTP/1.1 101 Switching Protocols%R%NUpgrade: websocket%R%NConnection: Upgrade%R%NSec-WebSocket-Accept: ")
+					from
+						i := 0
+					until
+						i >= 28
+					loop
+						resp.append_character (accept_buf.read_character (i))
+						i := i + 1
+					end
+					resp.append ("%R%N%R%N")
+					append_outbound_string (resp)
+
+					proto_state := Proto_ws_open
+					request_started_ms := 0
+					rooms.extend (Room_default)
+					if attached room_join_handler as h then
+						h.call ([fd, Room_default])
+					end
+					if reactor_handle /= default_pointer then
+						{VR_REACTOR_BRIDGE}.c_metric_inc_ws_upgrades (reactor_handle)
+					end
+					touch (a_now_ms)
+				else
+					append_error_response (400, "Bad Request")
+					mark_closing
+				end
+			else
+				-- Invalid WebSocket upgrade (missing key, bad version, etc.)
+				append_error_response (400, "Bad Request")
+				mark_closing
+			end
+		end
+
+	process_websocket_frames (a_now_ms: NATURAL_64)
+			-- Incrementally parse and dispatch WebSocket frames in `in_buf`.
+		local
+			consumed: INTEGER
+			done: BOOLEAN
+		do
+			from
+				done := False
+			until
+				done or in_buf_bytes < 2 or state /= State_open
+			loop
+				consumed := ws_parser.parse_frame (in_buf, in_read_offset, in_buf_bytes)
+				if consumed > 0 then
+					if reactor_handle /= default_pointer then
+						{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_in (reactor_handle)
+					end
+					in_read_offset := in_read_offset + consumed
+					if in_read_offset = in_write_offset then
+						in_read_offset := 0
+						in_write_offset := 0
+					end
+					touch (a_now_ms)
+					dispatch_ws_frame (a_now_ms)
+				elseif consumed = 0 then
+					done := True
+				else
+					-- Protocol error (consumed is -1002, -1009, etc.)
+					send_ws_close_frame ((-consumed).to_natural_16)
+					mark_closing
+					done := True
+				end
+			end
+		end
+
+	dispatch_ws_frame (a_now_ms: NATURAL_64)
+			-- Dispatch decoded frame according to its opcode.
+		local
+			op: INTEGER
+		do
+			op := ws_parser.last_opcode
+			if op = Ws_opcode_ping then
+				send_ws_pong_frame (in_buf.item + ws_parser.last_payload_offset, ws_parser.last_payload_length)
+			elseif op = Ws_opcode_pong then
+				-- Heartbeat response acknowledged (touch already refreshed timestamp)
+			elseif op = Ws_opcode_close then
+				send_ws_close_frame (ws_parser.close_status_code)
+				mark_closing
+			elseif op = Ws_opcode_text or op = Ws_opcode_binary or op = Ws_opcode_continuation then
+				if ws_parser.is_fin and frag_bytes = 0 then
+					-- Unfragmented message
+					on_ws_message (in_buf.item + ws_parser.last_payload_offset, ws_parser.last_payload_length, op)
+				else
+					-- Fragmented message accumulation
+					if frag_bytes = 0 then
+						frag_opcode := op
+					end
+					append_frag_payload (in_buf.item + ws_parser.last_payload_offset, ws_parser.last_payload_length)
+					if frag_bytes > Max_ws_message_size then
+						send_ws_close_frame (Ws_close_message_too_big)
+						mark_closing
+					elseif ws_parser.is_fin then
+						if attached frag_buf as fb then
+							on_ws_message (fb.item, frag_bytes, frag_opcode)
+						end
+						frag_bytes := 0
+					end
+				end
+			end
+		end
+
+	on_ws_message (a_data: POINTER; a_len, a_opcode: INTEGER)
+			-- Handle complete application WebSocket frame (echo or broadcast).
+		local
+			hdr: MANAGED_POINTER
+			hdr_len: INTEGER
+			is_pub: BOOLEAN
+		do
+			is_pub := {VR_REACTOR_BRIDGE}.c_has_pub_prefix (a_data, a_len)
+			if is_pub and attached broadcast_handler as bh then
+				bh.call ([Room_default, a_opcode, a_data + 4, a_len - 4])
+			else
+				-- Echo frame back to client
+				create hdr.make (10)
+				hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | a_opcode).to_natural_8, a_len, hdr.item)
+				append_outbound (hdr.item, hdr_len)
+				if a_len > 0 then
+					append_outbound (a_data, a_len)
+				end
+				if reactor_handle /= default_pointer then
+					{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
+				end
+			end
+		end
+
+	send_ws_pong_frame (a_payload: POINTER; a_len: INTEGER)
+			-- Transmit unmasked Pong frame echoing received Ping payload.
+		local
+			hdr: MANAGED_POINTER
+			hdr_len: INTEGER
+		do
+			create hdr.make (10)
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_pong).to_natural_8, a_len, hdr.item)
+			append_outbound (hdr.item, hdr_len)
+			if a_len > 0 then
+				append_outbound (a_payload, a_len)
+			end
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
+			end
+		end
+
+	send_ws_close_frame (a_code: NATURAL_16)
+			-- Transmit unmasked Close frame with status code.
+		local
+			hdr: MANAGED_POINTER
+			body: MANAGED_POINTER
+			hdr_len: INTEGER
+		do
+			create hdr.make (10)
+			create body.make (2)
+			body.put_natural_16_be (a_code, 0)
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_close).to_natural_8, 2, hdr.item)
+			append_outbound (hdr.item, hdr_len)
+			append_outbound (body.item, 2)
+			proto_state := Proto_ws_closing
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
+			end
+		end
+
+	append_frag_payload (a_src: POINTER; a_len: INTEGER)
+			-- Accumulate payload chunk into lazy fragmentation buffer.
+		local
+			fb: MANAGED_POINTER
+			needed: INTEGER
+		do
+			if not attached frag_buf as f then
+				create fb.make (Max_ws_message_size.min (a_len.max (16384)))
+				frag_buf := fb
+			else
+				fb := f
+			end
+			if frag_bytes + a_len > fb.count then
+				needed := ((frag_bytes + a_len) * 2).min (Max_ws_message_size + 4096)
+				fb.resize (needed)
+			end
+			if frag_bytes + a_len <= fb.count then
+				{VR_REACTOR_BRIDGE}.c_memmove (fb.item + frag_bytes, a_src, a_len)
+			end
+			frag_bytes := frag_bytes + a_len
 		end
 
 	handle_http_request (a_now_ms: NATURAL_64)
@@ -426,8 +724,8 @@ feature -- Inbound & Outbound Buffer Compaction
 			bytes_added: in_buf_bytes = old in_buf_bytes + a_len
 		end
 
-	append_echo (a_src: POINTER; a_len: INTEGER)
-			-- Backward-compatible direct append to `out_buf` for TCP echo.
+	append_outbound (a_src: POINTER; a_len: INTEGER)
+			-- Append `a_len` bytes from `a_src` to outbound buffer with in-place compaction.
 		require
 			valid_src: a_src /= default_pointer
 			valid_len: a_len > 0
@@ -450,6 +748,17 @@ feature -- Inbound & Outbound Buffer Compaction
 			end
 			{VR_REACTOR_BRIDGE}.c_memmove (out_buf.item + out_write_offset, a_src, a_len)
 			out_write_offset := out_write_offset + a_len
+		ensure
+			bytes_appended: out_buf_bytes = old out_buf_bytes + a_len
+		end
+
+	append_echo (a_src: POINTER; a_len: INTEGER)
+			-- Backward-compatible direct append to `out_buf` for TCP echo.
+		require
+			valid_src: a_src /= default_pointer
+			valid_len: a_len > 0
+		do
+			append_outbound (a_src, a_len)
 		ensure
 			bytes_appended: out_buf_bytes = old out_buf_bytes + a_len
 		end
@@ -481,13 +790,13 @@ feature -- Inbound & Outbound Buffer Compaction
 					i := 1
 				invariant
 					valid_i: i >= 1 and i <= len + 1
-				variant
-					remaining: len + 1 - i
 				until
 					i > len
 				loop
 					out_buf.put_character (str.item (i), out_write_offset + i - 1)
 					i := i + 1
+				variant
+					remaining: len + 1 - i
 				end
 				out_write_offset := out_write_offset + len
 			end

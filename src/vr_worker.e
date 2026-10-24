@@ -12,15 +12,20 @@ create
 
 feature {NONE} -- Initialization
 
-	make (a_id: INTEGER; a_reactor_handle: POINTER)
-			-- Initialize worker `a_id` linked to native reactor `a_reactor_handle`.
+	make (a_id: INTEGER; a_reactor_handle: POINTER; a_broker: separate VR_BROKER; a_total_workers: INTEGER)
+			-- Initialize worker `a_id` linked to native reactor `a_reactor_handle` and shared `a_broker`.
 		require
 			valid_id: a_id >= 0
 			valid_handle: a_reactor_handle /= default_pointer
+			valid_broker: a_broker /= Void
+			valid_total: a_total_workers > 0
 		do
 			worker_id := a_id
 			reactor_handle := a_reactor_handle
+			broker := a_broker
+			total_workers := a_total_workers
 			create connections.make (1024)
+			create rooms.make (64)
 			create scratch_buffer.make (Scratch_buffer_size)
 			is_shutdown_complete := False
 			protocol := Proto_http_reading_headers
@@ -39,6 +44,15 @@ feature -- Access
 
 	reactor_handle: POINTER
 			-- Pointer to native vr_reactor_t instance
+
+	broker: separate VR_BROKER
+			-- Reference to shared separate Pub/Sub broker
+
+	total_workers: INTEGER
+			-- Total number of worker shards in reactor pool
+
+	rooms: HASH_TABLE [ARRAYED_LIST [INTEGER], INTEGER]
+			-- Worker-local subscription directory: room_id -> list of local client FDs
 
 	is_shutdown_complete: BOOLEAN
 			-- Has worker cleanly closed all connections during shutdown?
@@ -82,6 +96,9 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			end
 			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
 			create conn.make_with_proto (a_fd, a_generation, now_ms, protocol)
+			conn.set_reactor_handle (reactor_handle)
+			conn.set_broadcast_handler (agent publish_broadcast)
+			conn.set_room_join_handler (agent join_room)
 			connections.force (conn, a_fd)
 			{VR_REACTOR_BRIDGE}.c_metric_inc_open (reactor_handle)
 
@@ -241,6 +258,133 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			shutdown_flag_set: is_shutdown_complete
 		end
 
+feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
+
+	join_room (a_fd, a_room_id: INTEGER)
+			-- Subscribe connection `a_fd` to `a_room_id` locally.
+		require
+			valid_fd: a_fd >= 0
+			valid_room: a_room_id >= 0
+		local
+			list: ARRAYED_LIST [INTEGER]
+		do
+			if not rooms.has (a_room_id) then
+				create list.make (64)
+				rooms.put (list, a_room_id)
+			end
+			if attached rooms.item (a_room_id) as l and then not l.has (a_fd) then
+				l.extend (a_fd)
+				if attached connections.item (a_fd) as conn then
+					conn.register_room (a_room_id)
+				end
+			end
+		end
+
+	leave_room (a_fd, a_room_id: INTEGER)
+			-- Unsubscribe connection `a_fd` from `a_room_id` locally.
+		require
+			valid_fd: a_fd >= 0
+			valid_room: a_room_id >= 0
+		do
+			if attached rooms.item (a_room_id) as l then
+				l.prune_all (a_fd)
+			end
+			if attached connections.item (a_fd) as conn then
+				conn.unregister_room (a_room_id)
+			end
+		end
+
+	publish_broadcast (a_room_id, a_opcode: INTEGER; a_payload: POINTER; a_len: INTEGER)
+			-- Build C ref-counted message and asynchronously pass to broker.
+		require
+			valid_room: a_room_id >= 0
+			valid_len: a_len >= 0
+		local
+			msg_ptr: POINTER
+		do
+			msg_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_create (a_opcode, a_payload, a_len, total_workers)
+			if msg_ptr /= default_pointer then
+				dispatch_broker_publish (broker, a_room_id, msg_ptr)
+			end
+		end
+
+	on_room_publish (a_room_id: INTEGER; a_msg_handle: POINTER)
+			-- Fan out pre-framed broadcast message to all local subscribers of `a_room_id`.
+		require
+			valid_room: a_room_id >= 0
+			valid_msg: a_msg_handle /= default_pointer
+		local
+			data_ptr: POINTER
+			total_len, i, target_fd: INTEGER
+		do
+			if attached rooms.item (a_room_id) as subscriber_list then
+				data_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_data (a_msg_handle)
+				total_len := {VR_REACTOR_BRIDGE}.c_ws_msg_size (a_msg_handle)
+
+				from
+					i := 1
+				until
+					i > subscriber_list.count
+				loop
+					target_fd := subscriber_list.i_th (i)
+					if attached connections.item (target_fd) as conn and then conn.proto_state = Proto_ws_open then
+						deliver_frame_to_connection (conn, data_ptr, total_len)
+					end
+					i := i + 1
+				end
+			end
+			-- Decrement reference count; last worker automatically frees C memory
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+		end
+
+	deliver_frame_to_connection (a_conn: VR_CONNECTION; a_ptr: POINTER; a_len: INTEGER)
+			-- Deliver frame using direct non-blocking write fast-path.
+		require
+			valid_conn: a_conn /= Void
+			valid_ptr: a_ptr /= default_pointer
+			valid_len: a_len > 0
+		local
+			n, res: INTEGER
+			now_ms: NATURAL_64
+		do
+			if a_conn.paused_in then
+				{VR_REACTOR_BRIDGE}.c_metric_inc_ws_dropped (reactor_handle)
+			elseif a_conn.out_buf_bytes = 0 then
+				-- Fast Path: Socket idle, write directly to kernel
+				n := {VR_REACTOR_BRIDGE}.c_reactor_write (a_conn.fd, a_ptr, a_len)
+				now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+				if n = a_len then
+					a_conn.touch (now_ms)
+					{VR_REACTOR_BRIDGE}.c_metric_add_bytes_out (reactor_handle, n.to_natural_64)
+					{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
+				elseif n > 0 then
+					a_conn.append_outbound (a_ptr + n, a_len - n)
+					a_conn.touch (now_ms)
+					{VR_REACTOR_BRIDGE}.c_metric_add_bytes_out (reactor_handle, n.to_natural_64)
+					res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+				elseif n = Reactor_io_would_block then
+					a_conn.append_outbound (a_ptr, a_len)
+					res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+				else -- Reactor_io_error (-2)
+					close_connection (a_conn.fd)
+				end
+			else
+				a_conn.append_outbound (a_ptr, a_len)
+				if a_conn.out_buf_bytes >= Out_buf_high_water then
+					a_conn.set_paused_in (True)
+				end
+				res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+			end
+		end
+
+feature {NONE} -- SCOOP Broker Dispatch
+
+	dispatch_broker_publish (a_broker: separate VR_BROKER; a_room_id: INTEGER; a_msg_ptr: POINTER)
+			-- Asynchronous command to controlled separate broker.
+		do
+			a_broker.publish (a_room_id, a_msg_ptr)
+		end
+
 feature {NONE} -- Implementation
 
 	connections: HASH_TABLE [VR_CONNECTION, INTEGER]
@@ -257,6 +401,12 @@ feature {NONE} -- Implementation
 			res: INTEGER
 		do
 			if attached connections.item (a_fd) as conn then
+				-- Remove from all worker-local rooms immediately (Zero ghost deliveries!)
+				across conn.rooms as r_ic loop
+					if attached rooms.item (r_ic) as l then
+						l.prune_all (a_fd)
+					end
+				end
 				conn.mark_closed
 				connections.remove (a_fd)
 				res := {VR_REACTOR_BRIDGE}.c_reactor_del (reactor_handle, a_fd)
