@@ -32,12 +32,32 @@ feature -- I/O Status Codes
 	Reactor_io_error: INTEGER = -2
 			-- Fatal socket error
 
-feature -- Buffer Configuration
+feature -- Connection States
+
+	State_open: INTEGER = 1
+			-- Connection is active and processing events
+
+	State_closing: INTEGER = 2
+			-- Connection is in process of closing
+
+	State_closed: INTEGER = 3
+			-- Connection has been closed and removed
+
+feature -- Buffer and Pool Configuration
 
 	Event_size: INTEGER = 12
 			-- Size in bytes of one native vr_reactor_event_t struct (fd: 4 + gen: 4 + flags: 4)
 
 	Max_events: INTEGER = 256
 			-- Maximum number of events returned in one vr_reactor_wait call
+
+	Default_worker_count: INTEGER = 4
+			-- Default number of worker processors
+
+	Default_backlog: INTEGER = 1024
+			-- Default TCP listen queue backlog
+
+	Metrics_size: INTEGER = 32
+			-- Size in bytes of vr_reactor_metrics_t (4 * uint64_t)
 
 end

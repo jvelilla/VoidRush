@@ -4,6 +4,9 @@ note
 class
 	VR_APPLICATION
 
+inherit
+	VR_REACTOR_CONSTANTS
+
 create
 	make
 
@@ -12,28 +15,12 @@ feature {NONE} -- Initialization
 	make
 			-- Run VoidRush server.
 		local
-			reactor: separate VR_REACTOR
+			engine: VR_ENGINE
 		do
-			io.put_string ("VoidRush networking engine starting on port " + Default_port.out + "...%N")
-			create reactor.make (Default_port)
-			io.put_string ("VR_REACTOR initialized successfully. Entering event loop...%N")
-			run_reactor (reactor)
-		end
-
-feature {NONE} -- Implementation
-
-	run_reactor (a_reactor: separate VR_REACTOR)
-			-- Run event loop on `a_reactor`.
-		local
-			running: BOOLEAN
-		do
-			from
-				running := True
-			until
-				not running
-			loop
-				a_reactor.step (1000)
-			end
+			io.put_string ("VoidRush networking engine starting on port " + Default_port.out + " with " + Default_worker_count.out + " workers...%N")
+			create engine.make (Default_port, Default_worker_count)
+			io.put_string ("VR_ENGINE initialized successfully. Entering event loop...%N")
+			engine.start
 		end
 
 feature {NONE} -- Constants

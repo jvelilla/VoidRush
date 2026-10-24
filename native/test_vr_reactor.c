@@ -16,9 +16,10 @@ int main(void) {
     printf("[test_vr_reactor] Starting native VR reactor unit tests...\n");
 
     /* 1. Lifecycle & Wakeup Test */
-    printf("[test_vr_reactor] 1. Testing reactor lifecycle and wakeup...\n");
+    printf("[test_vr_reactor] 1. Testing reactor lifecycle, wakeup, and shutdown flag...\n");
     vr_reactor_t *r = vr_reactor_create();
     assert(r != NULL);
+    assert(vr_reactor_is_shutting_down(r) == 0);
 
     /* Wakeup without pending user events */
     int res = vr_reactor_wakeup(r);
@@ -28,6 +29,21 @@ int main(void) {
     int n = vr_reactor_wait(r, events, 16, 100);
     /* wake_fd should be consumed internally, returning 0 user events */
     assert(n == 0);
+
+    /* Test metrics */
+    vr_reactor_metric_inc_accept(r);
+    vr_reactor_metric_inc_open(r);
+    vr_reactor_metric_inc_events(r, 5);
+    vr_reactor_metric_inc_stale(r);
+    vr_reactor_metrics_t metrics;
+    vr_reactor_get_metrics(r, &metrics);
+    assert(metrics.accepts_total == 1);
+    assert(metrics.active_connections == 1);
+    assert(metrics.events_total == 5);
+    assert(metrics.stale_events == 1);
+    vr_reactor_metric_dec_open(r);
+    vr_reactor_get_metrics(r, &metrics);
+    assert(metrics.active_connections == 0);
 
     /* 2. TCP Listen Test */
     printf("[test_vr_reactor] 2. Testing vr_reactor_listen_tcp on port %d...\n", TEST_PORT);
@@ -71,14 +87,14 @@ int main(void) {
     res = vr_reactor_mod(r, listen_fd, VR_REACTOR_IN, 0);
     assert(res == 0);
 
-    /* 4. Client I/O Event & Generation Check */
-    printf("[test_vr_reactor] 4. Testing client I/O and generation tokens...\n");
+    /* 4. Client I/O Event & Drain Discard */
+    printf("[test_vr_reactor] 4. Testing client I/O and vr_reactor_drain_discard...\n");
     uint32_t expected_gen = 42;
     res = vr_reactor_add(r, client_fd, VR_REACTOR_IN, expected_gen);
     assert(res == 0);
 
     /* Send payload from client */
-    const char *msg = "voidrush";
+    const char *msg = "voidrush_phase2_payload";
     ssize_t sent = send(client_sock, msg, strlen(msg), 0);
     assert(sent == (ssize_t)strlen(msg));
 
@@ -89,22 +105,34 @@ int main(void) {
     assert(events[0].generation == expected_gen);
     assert((events[0].flags & VR_REACTOR_IN) != 0);
 
-    /* Read message from client_fd */
-    char buf[32];
-    ssize_t rcvd = recv(client_fd, buf, sizeof(buf) - 1, 0);
-    assert(rcvd == sent);
-    buf[rcvd] = '\0';
-    assert(strcmp(buf, "voidrush") == 0);
+    /* Drain discard test */
+    int drain_res = vr_reactor_drain_discard(client_fd);
+    assert(drain_res == VR_REACTOR_IO_WOULD_BLOCK);
 
-    /* 5. Clean teardown and disposal */
-    printf("[test_vr_reactor] 5. Cleaning up sockets and reactor...\n");
+    /* Close client side and check EOF detection on next drain */
+    close(client_sock);
+    /* Mod client_fd to re-arm */
+    res = vr_reactor_mod(r, client_fd, VR_REACTOR_IN, expected_gen);
+    assert(res == 0);
+
+    n = vr_reactor_wait(r, events, 16, 500);
+    assert(n == 1);
+    assert(events[0].fd == client_fd);
+    drain_res = vr_reactor_drain_discard(client_fd);
+    assert(drain_res == VR_REACTOR_IO_EOF);
+
+    /* 5. Atomic shutdown test */
+    printf("[test_vr_reactor] 5. Testing atomic shutdown control...\n");
+    vr_reactor_request_shutdown(r);
+    assert(vr_reactor_is_shutting_down(r) == 1);
+
+    /* 6. Clean teardown and disposal */
+    printf("[test_vr_reactor] 6. Cleaning up sockets and reactor...\n");
     res = vr_reactor_close(client_fd);
     assert(res == 0);
 
     res = vr_reactor_close(listen_fd);
     assert(res == 0);
-
-    close(client_sock);
 
     vr_reactor_destroy(r);
 

@@ -18,6 +18,11 @@
 struct vr_reactor {
     int epfd;
     int wake_fd;
+    int shutdown_flag;
+    uint64_t active_connections;
+    uint64_t accepts_total;
+    uint64_t events_total;
+    uint64_t stale_events;
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
 
@@ -76,6 +81,18 @@ void vr_reactor_destroy(vr_reactor_t *r) {
     if (r->wake_fd >= 0) close(r->wake_fd);
     if (r->epfd >= 0)    close(r->epfd);
     free(r);
+}
+
+void vr_reactor_request_shutdown(vr_reactor_t *r) {
+    if (r) {
+        __atomic_store_n(&r->shutdown_flag, 1, __ATOMIC_RELEASE);
+        vr_reactor_wakeup(r);
+    }
+}
+
+int vr_reactor_is_shutting_down(const vr_reactor_t *r) {
+    if (!r) return 1;
+    return __atomic_load_n(&r->shutdown_flag, __ATOMIC_ACQUIRE);
 }
 
 int vr_reactor_add(vr_reactor_t *r, int fd, uint32_t flags, uint32_t generation) {
@@ -186,4 +203,88 @@ int vr_reactor_accept_nonblocking(int listen_fd) {
 
 int vr_reactor_close(int fd) {
     return close(fd);
+}
+
+int vr_reactor_connect_tcp(const char *host, int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    if (!host || host[0] == '\0') {
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    } else {
+        inet_pton(AF_INET, host, &addr.sin_addr);
+    }
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+int vr_reactor_send(int fd, const char *buf, int len) {
+    return (int)send(fd, buf, len, 0);
+}
+
+int vr_reactor_drain_discard(int fd) {
+    char buf[4096];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n > 0) {
+            continue; /* Keep reading until EAGAIN for EPOLLET */
+        }
+        if (n == 0) {
+            return VR_REACTOR_IO_EOF; /* Peer closed connection cleanly (FIN) */
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return VR_REACTOR_IO_WOULD_BLOCK; /* Drained to kernel boundary */
+        }
+        return VR_REACTOR_IO_ERROR; /* Socket reset or error */
+    }
+}
+
+void vr_reactor_metric_inc_accept(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->accepts_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_open(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_dec_open(vr_reactor_t *r) {
+    if (r) {
+        __atomic_sub_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_events(vr_reactor_t *r, uint64_t count) {
+    if (r) {
+        __atomic_add_fetch(&r->events_total, count, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_stale(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->stale_events, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
+    if (r && out) {
+        out->active_connections = __atomic_load_n(&r->active_connections, __ATOMIC_RELAXED);
+        out->accepts_total       = __atomic_load_n(&r->accepts_total, __ATOMIC_RELAXED);
+        out->events_total        = __atomic_load_n(&r->events_total, __ATOMIC_RELAXED);
+        out->stale_events        = __atomic_load_n(&r->stale_events, __ATOMIC_RELAXED);
+    }
 }
