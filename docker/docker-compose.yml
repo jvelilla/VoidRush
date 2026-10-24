@@ -1,0 +1,68 @@
+name: voidrush
+
+services:
+  test:
+    container_name: voidrush-test
+    build:
+      context: ./images/tools/eiffel-compilation
+    image: voidrush/tool-eiffel-compilation
+    volumes:
+      - ./_build:/opt/eiffel/build:rw
+      - ..:/opt/eiffel/src:rw
+      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
+    command: ["test"]
+
+  c-test:
+    container_name: voidrush-c-test
+    build:
+      context: ./images/tools/eiffel-compilation
+    image: voidrush/tool-eiffel-compilation
+    volumes:
+      - ./_build:/opt/eiffel/build:rw
+      - ..:/opt/eiffel/src:rw
+      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
+    command: ["c-test"]
+
+  valgrind:
+    container_name: voidrush-valgrind
+    build:
+      context: ./images/tools/eiffel-compilation
+    image: voidrush/tool-eiffel-compilation
+    volumes:
+      - ./_build:/opt/eiffel/build:rw
+      - ..:/opt/eiffel/src:rw
+      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
+    command: ["valgrind-c"]
+
+  server:
+    container_name: voidrush-server
+    build:
+      context: ./images/tools/eiffel-compilation
+    image: voidrush/tool-eiffel-compilation
+    stdin_open: true
+    tty: true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./_build:/opt/eiffel/build:rw
+      - ..:/opt/eiffel/src:rw
+      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
+    command: ["server"]
+
+  shell:
+    container_name: voidrush-shell
+    build:
+      context: ./images/tools/eiffel-compilation
+    image: voidrush/tool-eiffel-compilation
+    stdin_open: true
+    tty: true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./_build:/opt/eiffel/build:rw
+      - ..:/opt/eiffel/src:rw
+      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
+    entrypoint: ["/bin/bash"]
+
+volumes:
+  voidrush_eifgens_linux:

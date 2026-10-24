@@ -1,0 +1,23 @@
+# EiffelStudio build artifacts
+EIFGENs/
+EIFGENS/
+*.epr
+
+# Planning & temporary notes
+plan/
+
+# Docker build outputs
+docker/_build/
+
+# C build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.out
+
+# Editor / OS / Agent configuration
+.agent/
+.DS_Store
+Thumbs.db
+
