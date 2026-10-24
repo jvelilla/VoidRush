@@ -1,5 +1,5 @@
 note
-	description: "Worker processor managing a partition of connections and event handling"
+	description: "Worker processor managing a partition of connections, non-blocking I/O turn, and idle sweeps"
 
 class
 	VR_WORKER
@@ -21,6 +21,7 @@ feature {NONE} -- Initialization
 			worker_id := a_id
 			reactor_handle := a_reactor_handle
 			create connections.make (1024)
+			create scratch_buffer.make (Scratch_buffer_size)
 			is_shutdown_complete := False
 		ensure
 			id_set: worker_id = a_id
@@ -56,15 +57,18 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 		local
 			conn: VR_CONNECTION
 			res: INTEGER
+			now_ms: NATURAL_64
 		do
 			if connections.has (a_fd) then
 				-- Defensive cleanup if OS recycled FD before old close was processed
 				close_connection (a_fd)
 			end
-			create conn.make (a_fd, a_generation)
+			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+			create conn.make_with_time (a_fd, a_generation, now_ms)
 			connections.force (conn, a_fd)
 			{VR_REACTOR_BRIDGE}.c_metric_inc_open (reactor_handle)
 
+			-- Worker-exclusive registration to epoll
 			res := {VR_REACTOR_BRIDGE}.c_reactor_add (reactor_handle, a_fd, Reactor_in, a_generation)
 			if res /= 0 then
 				close_connection (a_fd)
@@ -74,31 +78,125 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 		end
 
 	on_socket_event (a_fd: INTEGER; a_generation, a_flags: NATURAL_32)
-			-- Process readiness notification dispatched from reactor.
+			-- Process 7-step readiness turn for socket `a_fd`.
 		require
 			valid_fd: a_fd >= 0
 		local
-			res: INTEGER
+			now_ms: NATURAL_64
+			read_turn, write_turn, chunk, n, res: INTEGER
+			read_done, write_done: BOOLEAN
 		do
 			if attached connections.item (a_fd) as conn and then conn.matches (a_generation) then
-				if (a_flags & (Reactor_err | Reactor_hup)) /= 0 then
+				now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+
+				-- Step 2: Fatal error check (immediate abort)
+				if (a_flags & Reactor_err) /= 0 then
 					close_connection (a_fd)
-				elseif (a_flags & Reactor_in) /= 0 then
-					res := {VR_REACTOR_BRIDGE}.c_reactor_drain_discard (a_fd)
-					if res = Reactor_io_would_block then
-						-- Socket drained cleanly; re-arm EPOLLONESHOT for next event
-						res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_fd, Reactor_in, a_generation)
-						if res /= 0 then
-							close_connection (a_fd)
+				else
+					-- Step 3: Inbound Read Loop (Executed BEFORE checking Reactor_hup)
+					if (a_flags & Reactor_in) /= 0 and conn.state = State_open and not conn.paused_in then
+						from
+							read_turn := 0
+							read_done := False
+						until
+							read_done or read_turn >= Read_budget_per_turn
+						loop
+							chunk := (Read_budget_per_turn - read_turn).min (scratch_buffer.count)
+							n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_fd, scratch_buffer.item, chunk)
+							if n > 0 then
+								read_turn := read_turn + n
+								conn.append_echo (scratch_buffer.item, n)
+								conn.touch (now_ms)
+								if conn.out_buf_bytes >= Out_buf_high_water then
+									conn.set_paused_in (True)
+									read_done := True
+								end
+							elseif n = Reactor_io_eof then
+								conn.mark_closing
+								read_done := True
+							elseif n = Reactor_io_would_block then
+								read_done := True
+							else -- Reactor_io_error (-2)
+								close_connection (a_fd)
+								read_done := True
+							end
 						end
-					else
-						-- EOF (0) or Fatal Error (-2): peer closed or reset connection
-						close_connection (a_fd)
+					end
+
+					-- Step 4: Half-closed check (latching Closing state after reading inbound data)
+					if connections.has (a_fd) and then (a_flags & Reactor_hup) /= 0 and conn.state = State_open then
+						conn.mark_closing
+					end
+
+					-- Step 5: Outbound Write Loop (flushing out_buf under write budget)
+					if connections.has (a_fd) then
+						from
+							write_turn := 0
+							write_done := False
+						until
+							write_done or conn.out_buf_bytes = 0 or write_turn >= Write_budget_per_turn
+						loop
+							chunk := conn.out_buf_bytes.min (Write_budget_per_turn - write_turn)
+							n := {VR_REACTOR_BRIDGE}.c_reactor_write (a_fd, conn.read_pointer, chunk)
+							if n > 0 then
+								write_turn := write_turn + n
+								conn.advance_read (n)
+								conn.touch (now_ms)
+							elseif n = Reactor_io_would_block then
+								write_done := True
+							else -- Reactor_io_error (-2)
+								close_connection (a_fd)
+								write_done := True
+							end
+						end
+					end
+
+					-- Step 6: Update flow-control hysteresis latch
+					if connections.has (a_fd) then
+						if conn.out_buf_bytes >= Out_buf_high_water then
+							conn.set_paused_in (True)
+						elseif conn.out_buf_bytes <= Out_buf_low_water then
+							conn.set_paused_in (False)
+						end
+
+						-- Step 7: Final state disposition
+						if conn.state = State_closing and conn.out_buf_bytes = 0 then
+							close_connection (a_fd)
+						else
+							if conn.interest_flags /= 0 then
+								res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_fd, conn.interest_flags, a_generation)
+								if res /= 0 then
+									close_connection (a_fd)
+								end
+							end
+						end
 					end
 				end
 			else
 				-- Stale event for an obsolete generation or unregistered socket
 				{VR_REACTOR_BRIDGE}.c_metric_inc_stale (reactor_handle)
+			end
+		end
+
+	on_timer_tick (a_now_ms: NATURAL_64)
+			-- Worker-local idle connection sweep.
+		require
+			valid_time: a_now_ms > 0
+		local
+			expired_fds: ARRAYED_LIST [INTEGER]
+		do
+			create expired_fds.make (64)
+			across
+				connections as ic
+			loop
+				if ic.is_idle (a_now_ms, Idle_timeout_ms) then
+					expired_fds.extend (@ic.key)
+				end
+			end
+			across
+				expired_fds as fd_ic
+			loop
+				close_connection (fd_ic)
 			end
 		end
 
@@ -128,6 +226,9 @@ feature {NONE} -- Implementation
 
 	connections: HASH_TABLE [VR_CONNECTION, INTEGER]
 			-- Worker-local connection directory (strictly non-separate)
+
+	scratch_buffer: MANAGED_POINTER
+			-- Dedicated worker scratch memory for non-blocking reads
 
 	close_connection (a_fd: INTEGER)
 			-- Remove from tracking, deregister from epoll, and close file descriptor.

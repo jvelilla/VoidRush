@@ -63,8 +63,23 @@ int vr_reactor_listen_tcp(const char *host, int port, int backlog);
 int vr_reactor_accept_nonblocking(int listen_fd);
 int vr_reactor_set_nonblocking(int fd);
 int vr_reactor_close(int fd);
+int vr_reactor_shutdown_wr(int fd);
 int vr_reactor_connect_tcp(const char *host, int port);
 int vr_reactor_send(int fd, const char *buf, int len);
+
+/* Non-blocking Data I/O (Phase 3)
+ * Returns > 0 (bytes transferred), VR_REACTOR_IO_EOF (0),
+ * VR_REACTOR_IO_WOULD_BLOCK (-1), or VR_REACTOR_IO_ERROR (-2)
+ */
+int vr_reactor_read(int fd, void *buf, size_t len);
+int vr_reactor_write(int fd, const void *buf, size_t len);
+
+/* Fast Monotonic Millisecond Clock (CLOCK_MONOTONIC_COARSE) */
+uint64_t vr_reactor_now_ms(void);
+void     vr_reactor_sleep_ms(int ms);
+
+/* Memory Helpers */
+void vr_reactor_memmove(void *dest, const void *src, size_t n);
 
 /* Edge-Triggered Drain & Discard */
 int vr_reactor_drain_discard(int fd);

@@ -121,6 +121,45 @@ int main(void) {
     drain_res = vr_reactor_drain_discard(client_fd);
     assert(drain_res == VR_REACTOR_IO_EOF);
 
+    /* 4b. Phase 3 Non-blocking Read/Write, Clock, and Memmove Test */
+    printf("[test_vr_reactor] 4b. Testing Phase 3 clock, memmove, and non-blocking I/O...\n");
+    uint64_t t1 = vr_reactor_now_ms();
+    assert(t1 > 0);
+    usleep(2000); /* sleep 2ms */
+    uint64_t t2 = vr_reactor_now_ms();
+    assert(t2 >= t1);
+
+    /* Test memmove */
+    char test_mem[16] = "abcdefgh";
+    vr_reactor_memmove(test_mem, test_mem + 3, 5); /* shift "defgh" to start */
+    assert(memcmp(test_mem, "defgh", 5) == 0);
+
+    /* Test read/write on a socketpair */
+    int sp[2];
+    res = socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sp);
+    assert(res == 0);
+
+    const char *echo_in = "Phase3_Echo_Payload";
+    size_t echo_len = strlen(echo_in);
+    int written = vr_reactor_write(sp[0], echo_in, echo_len);
+    assert(written == (int)echo_len);
+
+    char echo_out[64];
+    memset(echo_out, 0, sizeof(echo_out));
+    int read_bytes = vr_reactor_read(sp[1], echo_out, sizeof(echo_out));
+    assert(read_bytes == (int)echo_len);
+    assert(strcmp(echo_out, echo_in) == 0);
+
+    /* Subsequent read on empty non-blocking socket should return WOULD_BLOCK */
+    int wb = vr_reactor_read(sp[1], echo_out, sizeof(echo_out));
+    assert(wb == VR_REACTOR_IO_WOULD_BLOCK);
+
+    /* Closing write end triggers EOF on read end */
+    close(sp[0]);
+    int eof_res = vr_reactor_read(sp[1], echo_out, sizeof(echo_out));
+    assert(eof_res == VR_REACTOR_IO_EOF);
+    close(sp[1]);
+
     /* 5. Atomic shutdown test */
     printf("[test_vr_reactor] 5. Testing atomic shutdown control...\n");
     vr_reactor_request_shutdown(r);

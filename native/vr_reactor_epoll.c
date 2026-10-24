@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 
 #define VR_MAX_INTERNAL_EVENTS 1024
 
@@ -205,6 +206,10 @@ int vr_reactor_close(int fd) {
     return close(fd);
 }
 
+int vr_reactor_shutdown_wr(int fd) {
+    return shutdown(fd, SHUT_WR);
+}
+
 int vr_reactor_connect_tcp(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -228,6 +233,51 @@ int vr_reactor_connect_tcp(const char *host, int port) {
 
 int vr_reactor_send(int fd, const char *buf, int len) {
     return (int)send(fd, buf, len, 0);
+}
+
+int vr_reactor_read(int fd, void *buf, size_t len) {
+    if (len == 0) return 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, len);
+        if (n > 0) return (int)n;
+        if (n == 0) return VR_REACTOR_IO_EOF;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return VR_REACTOR_IO_WOULD_BLOCK;
+        return VR_REACTOR_IO_ERROR;
+    }
+}
+
+int vr_reactor_write(int fd, const void *buf, size_t len) {
+    if (len == 0) return 0;
+    for (;;) {
+        ssize_t n = write(fd, buf, len);
+        if (n > 0) return (int)n;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return VR_REACTOR_IO_WOULD_BLOCK;
+        return VR_REACTOR_IO_ERROR;
+    }
+}
+
+uint64_t vr_reactor_now_ms(void) {
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+void vr_reactor_sleep_ms(int ms) {
+    if (ms > 0) {
+        usleep((useconds_t)ms * 1000);
+    }
+}
+
+void vr_reactor_memmove(void *dest, const void *src, size_t n) {
+    if (n > 0 && dest != src) {
+        memmove(dest, src, n);
+    }
 }
 
 int vr_reactor_drain_discard(int fd) {

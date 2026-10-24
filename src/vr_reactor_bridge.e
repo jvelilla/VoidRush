@@ -139,6 +139,26 @@ feature -- Socket Helpers
 			instance_free: class
 		end
 
+	c_set_nonblocking (fd: INTEGER): INTEGER
+			-- Set non-blocking mode on socket `fd`.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_set_nonblocking((int) $fd);"
+		ensure
+			instance_free: class
+		end
+
+	c_shutdown_wr (fd: INTEGER): INTEGER
+			-- Half-close write side of TCP socket (sends FIN to peer).
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_shutdown_wr((int) $fd);"
+		ensure
+			instance_free: class
+		end
+
 	c_connect_tcp (host: POINTER; port: INTEGER): INTEGER
 			-- Create TCP socket and connect to `host` and `port`.
 		external
@@ -155,6 +175,60 @@ feature -- Socket Helpers
 			"C inline use %"vr_reactor_bridge.h%""
 		alias
 			"return (EIF_INTEGER) vr_reactor_send((int) $fd, (const char *) $buf, (int) $len);"
+		ensure
+			instance_free: class
+		end
+
+feature -- Non-blocking Data I/O (Phase 3)
+
+	c_reactor_read (fd: INTEGER; buf: POINTER; len: INTEGER): INTEGER
+			-- Read up to `len` bytes into `buf`. Returns bytes read (> 0),
+			-- Reactor_io_eof (0), Reactor_io_would_block (-1), or Reactor_io_error (-2).
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_read((int) $fd, (void *) $buf, (size_t) $len);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_write (fd: INTEGER; buf: POINTER; len: INTEGER): INTEGER
+			-- Write up to `len` bytes from `buf`. Returns bytes written (> 0),
+			-- Reactor_io_would_block (-1), or Reactor_io_error (-2).
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_write((int) $fd, (const void *) $buf, (size_t) $len);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_now_ms: NATURAL_64
+			-- Fast monotonic millisecond clock via CLOCK_MONOTONIC_COARSE.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_64) vr_reactor_now_ms();"
+		ensure
+			instance_free: class
+		end
+
+	c_sleep_ms (ms: INTEGER)
+			-- Sleep for `ms` milliseconds.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_sleep_ms((int) $ms);"
+		ensure
+			instance_free: class
+		end
+
+	c_memmove (dest, src: POINTER; n: INTEGER)
+			-- Shift memory region handling overlapping segments.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_memmove((void *) $dest, (const void *) $src, (size_t) $n);"
 		ensure
 			instance_free: class
 		end

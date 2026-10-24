@@ -44,6 +44,8 @@ feature {NONE} -- Initialization
 			-- Generation 0 is reserved exclusively for the listening socket
 			res := {VR_REACTOR_BRIDGE}.c_reactor_add (handle, listen_fd, Reactor_in, 0)
 			check listen_registered: res = 0 end
+
+			last_tick_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
 		ensure
 			is_open: is_open
 			is_listening: is_listening
@@ -94,13 +96,14 @@ feature -- Execution
 		end
 
 	step (timeout_ms: INTEGER)
-			-- Single poll tick and event dispatch cycle.
+			-- Single poll tick, event dispatch cycle, and periodic timer tick.
 		require
 			is_open: is_open
 		local
 			n, i, fd: INTEGER
 			gen, flags: NATURAL_32
 			target_worker: separate VR_WORKER
+			now_ms: NATURAL_64
 		do
 			n := {VR_REACTOR_BRIDGE}.c_reactor_wait (handle, events.base_address, Max_events, timeout_ms)
 			if n > 0 then
@@ -119,6 +122,20 @@ feature -- Execution
 						target_worker := workers.item (fd \\ worker_count)
 						dispatch_event (target_worker, fd, gen, flags)
 					end
+					i := i + 1
+				end
+			end
+
+			-- Periodic worker idle sweep tick
+			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+			if now_ms >= last_tick_ms + Timer_tick_interval_ms.to_natural_64 then
+				last_tick_ms := now_ms
+				from
+					i := 0
+				until
+					i >= workers.count
+				loop
+					dispatch_timer_tick (workers.item (i), now_ms)
 					i := i + 1
 				end
 			end
@@ -196,6 +213,12 @@ feature {NONE} -- SCOOP Controlled Dispatch Helpers
 			a_worker.on_socket_event (a_fd, a_gen, a_flags)
 		end
 
+	dispatch_timer_tick (a_worker: separate VR_WORKER; a_now_ms: NATURAL_64)
+			-- Asynchronous timer tick command to controlled worker argument.
+		do
+			a_worker.on_timer_tick (a_now_ms)
+		end
+
 	dispatch_shutdown (a_worker: separate VR_WORKER)
 			-- Asynchronous shutdown command to controlled worker argument.
 		do
@@ -211,19 +234,21 @@ feature {NONE} -- SCOOP Controlled Dispatch Helpers
 feature {NONE} -- Implementation
 
 	accept_pending_connections
-			-- Accept all queued clients until WOULD_BLOCK and dispatch to assigned workers.
+			-- Accept up to Accept_budget_per_turn queued clients to prevent starvation.
 		local
-			client, res: INTEGER
+			client, res, count: INTEGER
 			done: BOOLEAN
 			target_worker: separate VR_WORKER
 		do
 			from
 				done := False
+				count := 0
 			until
-				done
+				done or count >= Accept_budget_per_turn
 			loop
 				client := {VR_REACTOR_BRIDGE}.c_accept_nonblocking (listen_fd)
 				if client >= 0 then
+					count := count + 1
 					next_generation := next_generation + 1
 					if next_generation = 0 then
 						next_generation := 1 -- 0 is reserved for listen_fd
@@ -240,12 +265,12 @@ feature {NONE} -- Implementation
 			check listen_rearmed: res = 0 end
 		end
 
-
 	handle: POINTER
 	listen_fd: INTEGER
 	events: VR_REACTOR_EVENT_BUFFER
 	workers: SPECIAL [separate VR_WORKER]
 	next_generation: NATURAL_32
+	last_tick_ms: NATURAL_64
 
 invariant
 	valid_listen_socket: listen_fd >= -1
