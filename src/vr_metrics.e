@@ -37,6 +37,15 @@ feature -- Access
 	stale_events: NATURAL_64
 			-- Count of events dropped due to generation token mismatch
 
+	bytes_in_total: NATURAL_64
+			-- Cumulative total bytes received from all connections
+
+	bytes_out_total: NATURAL_64
+			-- Cumulative total bytes sent across all connections
+
+	idle_timeouts_total: NATURAL_64
+			-- Cumulative total connections closed due to idle or Slowloris timeout
+
 feature -- Status Report
 
 	refresh (a_handle: POINTER)
@@ -52,6 +61,9 @@ feature -- Status Report
 			accepts_total := buf.read_natural_64 (8)
 			events_total := buf.read_natural_64 (16)
 			stale_events := buf.read_natural_64 (24)
+			bytes_in_total := buf.read_natural_64 (32)
+			bytes_out_total := buf.read_natural_64 (40)
+			idle_timeouts_total := buf.read_natural_64 (48)
 		end
 
 feature -- Output
@@ -59,11 +71,14 @@ feature -- Output
 	out: STRING
 			-- Human-readable metrics snapshot.
 		do
-			create Result.make (128)
+			create Result.make (192)
 			Result.append ("Metrics [accepts=" + accepts_total.out)
 			Result.append (", active=" + active_connections.out)
 			Result.append (", events=" + events_total.out)
-			Result.append (", stale=" + stale_events.out + "]")
+			Result.append (", stale=" + stale_events.out)
+			Result.append (", bytes_in=" + bytes_in_total.out)
+			Result.append (", bytes_out=" + bytes_out_total.out)
+			Result.append (", idle_drops=" + idle_timeouts_total.out + "]")
 		end
 
 end

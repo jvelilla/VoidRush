@@ -298,8 +298,38 @@ feature -- Atomic Metrics
 			instance_free: class
 		end
 
+	c_metric_add_bytes_in (r: POINTER; bytes: NATURAL_64)
+			-- Add bytes to total inbound counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_add_bytes_in((vr_reactor_t *) $r, (uint64_t) $bytes);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_add_bytes_out (r: POINTER; bytes: NATURAL_64)
+			-- Add bytes to total outbound counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_add_bytes_out((vr_reactor_t *) $r, (uint64_t) $bytes);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_idle_timeouts (r: POINTER)
+			-- Increment total idle/slowloris timeouts counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_idle_timeouts((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
 	c_reactor_get_metrics (r, out_buf: POINTER)
-			-- Snapshot metrics into `out_buf` (must be at least 32 bytes).
+			-- Snapshot metrics into `out_buf` (must be at least 56 bytes).
 		external
 			"C inline use %"vr_reactor_bridge.h%""
 		alias

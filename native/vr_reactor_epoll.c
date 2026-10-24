@@ -24,6 +24,9 @@ struct vr_reactor {
     uint64_t accepts_total;
     uint64_t events_total;
     uint64_t stale_events;
+    uint64_t bytes_in_total;
+    uint64_t bytes_out_total;
+    uint64_t idle_timeouts_total;
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
 
@@ -330,11 +333,32 @@ void vr_reactor_metric_inc_stale(vr_reactor_t *r) {
     }
 }
 
+void vr_reactor_metric_add_bytes_in(vr_reactor_t *r, uint64_t bytes) {
+    if (r && bytes > 0) {
+        __atomic_add_fetch(&r->bytes_in_total, bytes, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_add_bytes_out(vr_reactor_t *r, uint64_t bytes) {
+    if (r && bytes > 0) {
+        __atomic_add_fetch(&r->bytes_out_total, bytes, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_idle_timeouts(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->idle_timeouts_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
 void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
     if (r && out) {
-        out->active_connections = __atomic_load_n(&r->active_connections, __ATOMIC_RELAXED);
-        out->accepts_total       = __atomic_load_n(&r->accepts_total, __ATOMIC_RELAXED);
-        out->events_total        = __atomic_load_n(&r->events_total, __ATOMIC_RELAXED);
-        out->stale_events        = __atomic_load_n(&r->stale_events, __ATOMIC_RELAXED);
+        out->active_connections  = __atomic_load_n(&r->active_connections, __ATOMIC_RELAXED);
+        out->accepts_total        = __atomic_load_n(&r->accepts_total, __ATOMIC_RELAXED);
+        out->events_total         = __atomic_load_n(&r->events_total, __ATOMIC_RELAXED);
+        out->stale_events         = __atomic_load_n(&r->stale_events, __ATOMIC_RELAXED);
+        out->bytes_in_total       = __atomic_load_n(&r->bytes_in_total, __ATOMIC_RELAXED);
+        out->bytes_out_total      = __atomic_load_n(&r->bytes_out_total, __ATOMIC_RELAXED);
+        out->idle_timeouts_total  = __atomic_load_n(&r->idle_timeouts_total, __ATOMIC_RELAXED);
     }
 }

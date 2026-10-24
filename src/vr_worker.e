@@ -23,11 +23,13 @@ feature {NONE} -- Initialization
 			create connections.make (1024)
 			create scratch_buffer.make (Scratch_buffer_size)
 			is_shutdown_complete := False
+			protocol := Proto_http_reading_headers
 		ensure
 			id_set: worker_id = a_id
 			handle_set: reactor_handle = a_reactor_handle
 			not_shutdown: not is_shutdown_complete
 			empty_connections: connections.is_empty
+			default_proto: protocol = Proto_http_reading_headers
 		end
 
 feature -- Access
@@ -41,10 +43,25 @@ feature -- Access
 	is_shutdown_complete: BOOLEAN
 			-- Has worker cleanly closed all connections during shutdown?
 
+	protocol: INTEGER
+			-- Inbound protocol state for newly registered connections
+
 	connection_count: INTEGER
 			-- Number of currently tracked active connections
 		do
 			Result := connections.count
+		end
+
+feature -- Configuration
+
+	set_protocol (a_proto: INTEGER)
+			-- Configure protocol state for subsequent client registrations.
+		require
+			valid_proto: a_proto >= Proto_echo and a_proto <= Proto_http_reading_body
+		do
+			protocol := a_proto
+		ensure
+			proto_set: protocol = a_proto
 		end
 
 feature -- Asynchronous Commands (Invoked from VR_REACTOR)
@@ -64,7 +81,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 				close_connection (a_fd)
 			end
 			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
-			create conn.make_with_time (a_fd, a_generation, now_ms)
+			create conn.make_with_proto (a_fd, a_generation, now_ms, protocol)
 			connections.force (conn, a_fd)
 			{VR_REACTOR_BRIDGE}.c_metric_inc_open (reactor_handle)
 
@@ -105,8 +122,8 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 							n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_fd, scratch_buffer.item, chunk)
 							if n > 0 then
 								read_turn := read_turn + n
-								conn.append_echo (scratch_buffer.item, n)
-								conn.touch (now_ms)
+								{VR_REACTOR_BRIDGE}.c_metric_add_bytes_in (reactor_handle, n.to_natural_64)
+								conn.on_data_received (scratch_buffer.item, n, now_ms)
 								if conn.out_buf_bytes >= Out_buf_high_water then
 									conn.set_paused_in (True)
 									read_done := True
@@ -140,6 +157,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 							n := {VR_REACTOR_BRIDGE}.c_reactor_write (a_fd, conn.read_pointer, chunk)
 							if n > 0 then
 								write_turn := write_turn + n
+								{VR_REACTOR_BRIDGE}.c_metric_add_bytes_out (reactor_handle, n.to_natural_64)
 								conn.advance_read (n)
 								conn.touch (now_ms)
 							elseif n = Reactor_io_would_block then
@@ -179,7 +197,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 		end
 
 	on_timer_tick (a_now_ms: NATURAL_64)
-			-- Worker-local idle connection sweep.
+			-- Worker-local idle and Slowloris connection sweep.
 		require
 			valid_time: a_now_ms > 0
 		local
@@ -189,13 +207,14 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			across
 				connections as ic
 			loop
-				if ic.is_idle (a_now_ms, Idle_timeout_ms) then
+				if ic.is_expired (a_now_ms) then
 					expired_fds.extend (@ic.key)
 				end
 			end
 			across
 				expired_fds as fd_ic
 			loop
+				{VR_REACTOR_BRIDGE}.c_metric_inc_idle_timeouts (reactor_handle)
 				close_connection (fd_ic)
 			end
 		end

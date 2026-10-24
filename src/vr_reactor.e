@@ -63,6 +63,25 @@ feature -- Access
 	worker_count: INTEGER
 			-- Number of worker partitions
 
+feature -- Configuration
+
+	set_protocol (a_proto: INTEGER)
+			-- Configure protocol mode across all worker processors.
+		require
+			valid_proto: a_proto >= Proto_echo and a_proto <= Proto_http_reading_body
+		local
+			i: INTEGER
+		do
+			from
+				i := 0
+			until
+				i >= workers.count
+			loop
+				dispatch_set_protocol (workers.item (i), a_proto)
+				i := i + 1
+			end
+		end
+
 feature -- Status Report
 
 	is_open: BOOLEAN
@@ -200,6 +219,12 @@ feature {NONE} -- Teardown & Barriers
 		end
 
 feature {NONE} -- SCOOP Controlled Dispatch Helpers
+
+	dispatch_set_protocol (a_worker: separate VR_WORKER; a_proto: INTEGER)
+			-- Asynchronous command configuring worker protocol mode.
+		do
+			a_worker.set_protocol (a_proto)
+		end
 
 	dispatch_register (a_worker: separate VR_WORKER; a_fd: INTEGER; a_gen: NATURAL_32)
 			-- Asynchronous registration command to controlled worker argument.

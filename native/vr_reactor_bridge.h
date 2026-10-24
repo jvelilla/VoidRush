@@ -33,13 +33,20 @@ _Static_assert(sizeof(vr_reactor_event_t) == 12, "vr_reactor_event_t must be 12 
 
 typedef struct vr_reactor vr_reactor_t;
 
-/* Metrics Snapshot */
+/* Metrics Snapshot (56 bytes) */
 typedef struct {
     uint64_t active_connections;
     uint64_t accepts_total;
     uint64_t events_total;
     uint64_t stale_events;
+    uint64_t bytes_in_total;
+    uint64_t bytes_out_total;
+    uint64_t idle_timeouts_total;
 } vr_reactor_metrics_t;
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(vr_reactor_metrics_t) == 56, "vr_reactor_metrics_t must be 56 bytes");
+#endif
 
 /* Lifecycle */
 vr_reactor_t *vr_reactor_create(void);
@@ -90,6 +97,9 @@ void vr_reactor_metric_inc_open(vr_reactor_t *r);
 void vr_reactor_metric_dec_open(vr_reactor_t *r);
 void vr_reactor_metric_inc_events(vr_reactor_t *r, uint64_t count);
 void vr_reactor_metric_inc_stale(vr_reactor_t *r);
+void vr_reactor_metric_add_bytes_in(vr_reactor_t *r, uint64_t bytes);
+void vr_reactor_metric_add_bytes_out(vr_reactor_t *r, uint64_t bytes);
+void vr_reactor_metric_inc_idle_timeouts(vr_reactor_t *r);
 void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out);
 
 #ifdef __cplusplus

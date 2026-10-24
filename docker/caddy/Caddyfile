@@ -1,0 +1,17 @@
+{
+    admin off
+    auto_https off
+}
+
+:80 {
+    reverse_proxy server:8080 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        transport http {
+            keepalive 60s
+            keepalive_idle_conns 1024
+        }
+    }
+}

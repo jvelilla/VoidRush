@@ -69,6 +69,41 @@ feature -- Fairness Budgets & Flow Control
 	Accept_budget_per_turn: INTEGER = 64
 			-- Maximum non-blocking accepts per reactor poll turn
 
+feature -- Protocol Sub-States (Phase 4)
+
+	Proto_echo: INTEGER = 0
+			-- Pure TCP Echo mode
+
+	Proto_awaiting_proxy_v2: INTEGER = 1
+			-- Awaiting 16+ byte binary PROXY protocol v2 header
+
+	Proto_http_reading_headers: INTEGER = 2
+			-- Reading HTTP/1.1 request line and headers
+
+	Proto_http_reading_body: INTEGER = 3
+			-- Reading HTTP/1.1 request body (Content-Length)
+
+feature -- HTTP Methods
+
+	Method_unknown: INTEGER = 0
+	Method_get: INTEGER = 1
+	Method_post: INTEGER = 2
+	Method_put: INTEGER = 3
+	Method_delete: INTEGER = 4
+	Method_head: INTEGER = 5
+	Method_options: INTEGER = 6
+
+feature -- HTTP Limits & Timeouts
+
+	Max_header_size: INTEGER = 16384
+			-- 16 KiB maximum request header section
+
+	Default_body_limit: INTEGER = 10485760
+			-- 10 MiB maximum request body size
+
+	Request_timeout_ms: NATURAL_64 = 10000
+			-- 10 seconds Slowloris request header deadline
+
 feature -- Buffer and Pool Configuration
 
 	Event_size: INTEGER = 12
@@ -83,7 +118,7 @@ feature -- Buffer and Pool Configuration
 	Default_backlog: INTEGER = 1024
 			-- Default TCP listen queue backlog
 
-	Metrics_size: INTEGER = 32
-			-- Size in bytes of vr_reactor_metrics_t (4 * uint64_t)
+	Metrics_size: INTEGER = 56
+			-- Size in bytes of vr_reactor_metrics_t (7 * uint64_t)
 
 end

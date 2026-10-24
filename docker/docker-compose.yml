@@ -49,20 +49,26 @@ services:
       - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
     command: ["server"]
 
-  shell:
-    container_name: voidrush-shell
-    build:
-      context: ./images/tools/eiffel-compilation
-    image: voidrush/tool-eiffel-compilation
-    stdin_open: true
-    tty: true
+  caddy-gate:
+    container_name: voidrush-caddy-gate
+    image: caddy:2-alpine
     ports:
-      - "8080:8080"
+      - "80:80"
+      - "443:443"
     volumes:
-      - ./_build:/opt/eiffel/build:rw
-      - ..:/opt/eiffel/src:rw
-      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
-    entrypoint: ["/bin/bash"]
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - server
+
+  haproxy-gate:
+    container_name: voidrush-haproxy-gate
+    image: haproxy:2.8-alpine
+    ports:
+      - "8081:80"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - server
 
 volumes:
   voidrush_eifgens_linux:

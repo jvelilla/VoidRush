@@ -31,16 +31,23 @@ int main(void) {
     assert(n == 0);
 
     /* Test metrics */
+    assert(sizeof(vr_reactor_metrics_t) == 56);
     vr_reactor_metric_inc_accept(r);
     vr_reactor_metric_inc_open(r);
     vr_reactor_metric_inc_events(r, 5);
     vr_reactor_metric_inc_stale(r);
+    vr_reactor_metric_add_bytes_in(r, 1024);
+    vr_reactor_metric_add_bytes_out(r, 2048);
+    vr_reactor_metric_inc_idle_timeouts(r);
     vr_reactor_metrics_t metrics;
     vr_reactor_get_metrics(r, &metrics);
     assert(metrics.accepts_total == 1);
     assert(metrics.active_connections == 1);
     assert(metrics.events_total == 5);
     assert(metrics.stale_events == 1);
+    assert(metrics.bytes_in_total == 1024);
+    assert(metrics.bytes_out_total == 2048);
+    assert(metrics.idle_timeouts_total == 1);
     vr_reactor_metric_dec_open(r);
     vr_reactor_get_metrics(r, &metrics);
     assert(metrics.active_connections == 0);
