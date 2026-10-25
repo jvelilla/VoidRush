@@ -33,7 +33,7 @@ _Static_assert(sizeof(vr_reactor_event_t) == 12, "vr_reactor_event_t must be 12 
 
 typedef struct vr_reactor vr_reactor_t;
 
-/* Metrics Snapshot (88 bytes) */
+/* Metrics Snapshot (120 bytes) */
 typedef struct {
     uint64_t active_connections;
     uint64_t accepts_total;
@@ -47,10 +47,15 @@ typedef struct {
     uint64_t ws_frames_in_total;
     uint64_t ws_frames_out_total;
     uint64_t ws_dropped_backpressure_total;
+    /* Phase 6 SSE metrics */
+    uint64_t sse_streams_total;
+    uint64_t sse_events_out_total;
+    uint64_t sse_heartbeats_total;
+    uint64_t sse_dropped_backpressure_total;
 } vr_reactor_metrics_t;
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(vr_reactor_metrics_t) == 88, "vr_reactor_metrics_t must be 88 bytes");
+_Static_assert(sizeof(vr_reactor_metrics_t) == 120, "vr_reactor_metrics_t must be 120 bytes");
 #endif
 
 /* Lifecycle */
@@ -109,7 +114,14 @@ void vr_reactor_metric_inc_ws_upgrades(vr_reactor_t *r);
 void vr_reactor_metric_inc_ws_frames_in(vr_reactor_t *r);
 void vr_reactor_metric_inc_ws_frames_out(vr_reactor_t *r);
 void vr_reactor_metric_inc_ws_dropped(vr_reactor_t *r);
+void vr_reactor_metric_inc_sse_streams(vr_reactor_t *r);
+void vr_reactor_metric_inc_sse_events_out(vr_reactor_t *r);
+void vr_reactor_metric_inc_sse_heartbeats(vr_reactor_t *r);
+void vr_reactor_metric_inc_sse_dropped(vr_reactor_t *r);
 void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out);
+
+/* Socket Options: TCP User Timeout (RFC 5482) */
+int vr_reactor_set_tcp_user_timeout(int fd, unsigned int timeout_ms);
 
 /* Phase 5: WebSocket Crypto, Framing & Ref-Counted Broadcast Buffers */
 int    vr_ws_compute_accept_key(const char *client_key, size_t key_len, char *out_accept);
@@ -118,12 +130,32 @@ size_t vr_base64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_
 void   vr_ws_unmask(uint8_t *payload, size_t len, const uint8_t mask_key[4]);
 int    vr_ws_encode_frame_header(uint8_t fin_and_opcode, size_t payload_len, uint8_t out_hdr[10]);
 
+struct vr_ws_msg {
+    int32_t ref_count;
+    size_t  total_len;
+    uint8_t data[];
+};
 typedef struct vr_ws_msg vr_ws_msg_t;
 
 vr_ws_msg_t   *vr_ws_msg_create(uint8_t opcode, const void *payload, size_t len, int initial_refs);
 const uint8_t *vr_ws_msg_data(const vr_ws_msg_t *msg);
 size_t         vr_ws_msg_size(const vr_ws_msg_t *msg);
 void           vr_ws_msg_unref(vr_ws_msg_t *msg);
+
+/* Phase 6: Server-Sent Events (SSE) Codec & Ref-Counted Broadcast */
+int vr_sse_format_event(
+    const char *id,    size_t id_len,
+    const char *event, size_t event_len,
+    const char *data,  size_t data_len,
+    char       *out_buf, size_t out_cap
+);
+
+vr_ws_msg_t *vr_sse_msg_create(
+    const char *id,    size_t id_len,
+    const char *event, size_t event_len,
+    const char *data,  size_t data_len,
+    int initial_refs
+);
 
 #ifdef __cplusplus
 }

@@ -216,11 +216,6 @@ int vr_ws_encode_frame_header(uint8_t fin_and_opcode, size_t payload_len, uint8_
 }
 
 /* --- Ref-Counted Pre-Framed Message Buffer --- */
-struct vr_ws_msg {
-    int32_t ref_count;
-    size_t  total_len;
-    uint8_t data[];
-};
 
 vr_ws_msg_t *vr_ws_msg_create(uint8_t opcode, const void *payload, size_t len, int initial_refs) {
     uint8_t hdr[10];

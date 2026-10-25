@@ -22,6 +22,8 @@ feature {NONE} -- Initialization
 			create x_forwarded_for_slice.make_empty
 			create x_forwarded_proto_slice.make_empty
 			create ws_key_slice.make_empty
+			create accept_slice.make_empty
+			create last_event_id_slice.make_empty
 			reset
 		ensure
 			reset_done: method = Method_unknown and header_bytes_consumed = 0
@@ -74,6 +76,12 @@ feature -- Access
 	ws_version: INTEGER
 			-- Parsed Sec-WebSocket-Version (must be 13)
 
+	accept_slice: VR_HTTP_SLICE
+			-- Value slice of Accept header, or empty if absent
+
+	last_event_id_slice: VR_HTTP_SLICE
+			-- Value slice of Last-Event-ID header, or empty if absent
+
 	is_websocket_upgrade_request: BOOLEAN
 			-- Is this request a valid RFC 6455 WebSocket upgrade request?
 		do
@@ -82,6 +90,26 @@ feature -- Access
 			          is_connection_upgrade and
 			          ws_key_slice.length = 24 and
 			          ws_version = 13
+		end
+
+	is_sse_request (buf: MANAGED_POINTER): BOOLEAN
+			-- Does request match GET /events or Accept: text/event-stream?
+		require
+			valid_buf: buf /= Void
+		do
+			Result := method = Method_get and then
+			          (path_slice.same_as_string (buf, "/events") or else
+			           accept_slice.has_substring_case_insensitive (buf, "text/event-stream"))
+		end
+
+	is_sse_publish_request (buf: MANAGED_POINTER): BOOLEAN
+			-- Does request match POST /events (or POST /publish)?
+		require
+			valid_buf: buf /= Void
+		do
+			Result := method = Method_post and then
+			          (path_slice.same_as_string (buf, "/events") or else
+			           path_slice.same_as_string (buf, "/publish"))
 		end
 
 feature -- State Management
@@ -99,6 +127,8 @@ feature -- State Management
 			is_upgrade_websocket := False
 			is_connection_upgrade := False
 			ws_key_slice.reset
+			accept_slice.reset
+			last_event_id_slice.reset
 			ws_version := 0
 			version_minor := 1
 			is_keep_alive := True
@@ -395,6 +425,16 @@ feature {NONE} -- Token Extraction
 			       (buf.read_character (name_offset) = 'X' or buf.read_character (name_offset) = 'x') and then
 			       (buf.read_character (name_offset + 12) = 'P' or buf.read_character (name_offset + 12) = 'p') then
 				x_forwarded_proto_slice := v_slice
+			-- Check "accept" (6 chars)
+			elseif name_len = 6 and then
+			       (buf.read_character (name_offset) = 'A' or buf.read_character (name_offset) = 'a') and then
+			       (buf.read_character (name_offset + 1) = 'C' or buf.read_character (name_offset + 1) = 'c') then
+				accept_slice := v_slice
+			-- Check "last-event-id" (13 chars)
+			elseif name_len = 13 and then
+			       (buf.read_character (name_offset) = 'L' or buf.read_character (name_offset) = 'l') and then
+			       (buf.read_character (name_offset + 5) = 'E' or buf.read_character (name_offset + 5) = 'e') then
+				last_event_id_slice := v_slice
 			end
 		end
 

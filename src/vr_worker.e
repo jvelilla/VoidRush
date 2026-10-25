@@ -6,6 +6,7 @@ class
 
 inherit
 	VR_REACTOR_CONSTANTS
+	VR_SSE_CONSTANTS
 
 create
 	make
@@ -26,6 +27,7 @@ feature {NONE} -- Initialization
 			total_workers := a_total_workers
 			create connections.make (1024)
 			create rooms.make (64)
+			create sse_rooms.make (64)
 			create scratch_buffer.make (Scratch_buffer_size)
 			is_shutdown_complete := False
 			protocol := Proto_http_reading_headers
@@ -53,6 +55,9 @@ feature -- Access
 
 	rooms: HASH_TABLE [ARRAYED_LIST [INTEGER], INTEGER]
 			-- Worker-local subscription directory: room_id -> list of local client FDs
+
+	sse_rooms: HASH_TABLE [ARRAYED_LIST [INTEGER], INTEGER]
+			-- Worker-local SSE subscription directory: room_id -> list of local client FDs
 
 	is_shutdown_complete: BOOLEAN
 			-- Has worker cleanly closed all connections during shutdown?
@@ -99,8 +104,13 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			conn.set_reactor_handle (reactor_handle)
 			conn.set_broadcast_handler (agent publish_broadcast)
 			conn.set_room_join_handler (agent join_room)
+			conn.set_sse_broadcast_handler (agent publish_sse_broadcast_from_slice)
+			conn.set_sse_room_join_handler (agent join_sse_room)
 			connections.force (conn, a_fd)
 			{VR_REACTOR_BRIDGE}.c_metric_inc_open (reactor_handle)
+
+			-- Configure TCP User Timeout (30s)
+			res := {VR_REACTOR_BRIDGE}.c_reactor_set_tcp_user_timeout (a_fd, 30000)
 
 			-- Worker-exclusive registration to epoll
 			res := {VR_REACTOR_BRIDGE}.c_reactor_add (reactor_handle, a_fd, Reactor_in, a_generation)
@@ -214,16 +224,30 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 		end
 
 	on_timer_tick (a_now_ms: NATURAL_64)
-			-- Worker-local idle and Slowloris connection sweep.
+			-- Worker-local idle sweep and SSE heartbeat dispatch.
 		require
 			valid_time: a_now_ms > 0
 		local
 			expired_fds: ARRAYED_LIST [INTEGER]
+			hb_ptr: POINTER
+			c_hb: ANY
 		do
 			create expired_fds.make (64)
+			c_hb := Sse_heartbeat_comment.to_c
+			hb_ptr := $c_hb
+
 			across
 				connections as ic
 			loop
+				if ic.proto_state = Proto_sse_open then
+					if a_now_ms - ic.last_sse_heartbeat_ms >= Sse_heartbeat_interval_ms then
+						deliver_frame_to_connection (ic, hb_ptr, Sse_heartbeat_comment.count)
+						ic.set_last_sse_heartbeat_ms (a_now_ms)
+						if reactor_handle /= default_pointer then
+							{VR_REACTOR_BRIDGE}.c_metric_inc_sse_heartbeats (reactor_handle)
+						end
+					end
+				end
 				if ic.is_expired (a_now_ms) then
 					expired_fds.extend (@ic.key)
 				end
@@ -348,7 +372,11 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			now_ms: NATURAL_64
 		do
 			if a_conn.paused_in then
-				{VR_REACTOR_BRIDGE}.c_metric_inc_ws_dropped (reactor_handle)
+				if a_conn.proto_state = Proto_sse_open then
+					{VR_REACTOR_BRIDGE}.c_metric_inc_sse_dropped (reactor_handle)
+				else
+					{VR_REACTOR_BRIDGE}.c_metric_inc_ws_dropped (reactor_handle)
+				end
 			elseif a_conn.out_buf_bytes = 0 then
 				-- Fast Path: Socket idle, write directly to kernel
 				n := {VR_REACTOR_BRIDGE}.c_reactor_write (a_conn.fd, a_ptr, a_len)
@@ -356,7 +384,11 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 				if n = a_len then
 					a_conn.touch (now_ms)
 					{VR_REACTOR_BRIDGE}.c_metric_add_bytes_out (reactor_handle, n.to_natural_64)
-					{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
+					if a_conn.proto_state = Proto_sse_open then
+						{VR_REACTOR_BRIDGE}.c_metric_inc_sse_events_out (reactor_handle)
+					else
+						{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
+					end
 				elseif n > 0 then
 					a_conn.append_outbound (a_ptr + n, a_len - n)
 					a_conn.touch (now_ms)
@@ -377,12 +409,119 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			end
 		end
 
+	join_sse_room (a_fd, a_room_id: INTEGER)
+			-- Subscribe connection `a_fd` to local SSE `a_room_id`.
+		require
+			valid_fd: a_fd >= 0
+			valid_room: a_room_id >= 0
+		local
+			list: ARRAYED_LIST [INTEGER]
+		do
+			if not sse_rooms.has (a_room_id) then
+				create list.make (64)
+				sse_rooms.put (list, a_room_id)
+			end
+			if attached sse_rooms.item (a_room_id) as l and then not l.has (a_fd) then
+				l.extend (a_fd)
+				if attached connections.item (a_fd) as conn then
+					conn.register_room (a_room_id)
+				end
+			end
+		ensure
+			room_has_fd: attached sse_rooms.item (a_room_id) as l and then l.has (a_fd)
+		end
+
+	leave_sse_room (a_fd, a_room_id: INTEGER)
+			-- Unsubscribe connection `a_fd` from local SSE `a_room_id`.
+		require
+			valid_fd: a_fd >= 0
+			valid_room: a_room_id >= 0
+		do
+			if attached sse_rooms.item (a_room_id) as l then
+				l.prune_all (a_fd)
+			end
+			if attached connections.item (a_fd) as conn then
+				conn.unregister_room (a_room_id)
+			end
+		end
+
+	publish_sse_broadcast (a_room_id: INTEGER; a_id, a_event, a_data: STRING_8)
+			-- Format SSE broadcast message once in C and asynchronously pass to broker.
+		require
+			valid_room: a_room_id >= 0
+			valid_data: a_data /= Void
+		local
+			msg_ptr: POINTER
+			c_id, c_ev, c_dt: ANY
+		do
+			c_id := a_id.to_c
+			c_ev := a_event.to_c
+			c_dt := a_data.to_c
+			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, a_id.count, $c_ev, a_event.count, $c_dt, a_data.count, total_workers)
+			if msg_ptr /= default_pointer then
+				dispatch_broker_publish_sse (broker, a_room_id, msg_ptr)
+			end
+		end
+
+	publish_sse_broadcast_from_slice (a_room_id: INTEGER; a_payload: POINTER; a_len: INTEGER)
+			-- Format SSE message from raw memory slice and dispatch to broker.
+		require
+			valid_room: a_room_id >= 0
+			valid_len: a_len >= 0
+		local
+			msg_ptr: POINTER
+			c_empty: ANY
+			empty_str: STRING_8
+		do
+			empty_str := ""
+			c_empty := empty_str.to_c
+			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_empty, 0, $c_empty, 0, a_payload, a_len, total_workers)
+			if msg_ptr /= default_pointer then
+				dispatch_broker_publish_sse (broker, a_room_id, msg_ptr)
+			end
+		end
+
+	on_sse_room_publish (a_room_id: INTEGER; a_msg_handle: POINTER)
+			-- Fan out pre-formatted SSE broadcast to all local SSE subscribers.
+		require
+			valid_room: a_room_id >= 0
+			valid_msg: a_msg_handle /= default_pointer
+		local
+			data_ptr: POINTER
+			total_len, i, target_fd: INTEGER
+		do
+			if attached sse_rooms.item (a_room_id) as subscriber_list then
+				data_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_data (a_msg_handle)
+				total_len := {VR_REACTOR_BRIDGE}.c_ws_msg_size (a_msg_handle)
+
+				from
+					i := 1
+				until
+					i > subscriber_list.count
+				loop
+					target_fd := subscriber_list.i_th (i)
+					if attached connections.item (target_fd) as conn and then conn.proto_state = Proto_sse_open then
+						deliver_frame_to_connection (conn, data_ptr, total_len)
+					end
+					i := i + 1
+				end
+			end
+			-- Decrement reference count; last worker frees memory atomically
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+		end
+
 feature {NONE} -- SCOOP Broker Dispatch
 
 	dispatch_broker_publish (a_broker: separate VR_BROKER; a_room_id: INTEGER; a_msg_ptr: POINTER)
 			-- Asynchronous command to controlled separate broker.
 		do
 			a_broker.publish (a_room_id, a_msg_ptr)
+		end
+
+	dispatch_broker_publish_sse (a_broker: separate VR_BROKER; a_room_id: INTEGER; a_msg_ptr: POINTER)
+			-- Asynchronous command to controlled separate broker for SSE.
+		do
+			a_broker.publish_sse (a_room_id, a_msg_ptr)
 		end
 
 feature {NONE} -- Implementation
@@ -405,6 +544,9 @@ feature {NONE} -- Implementation
 				across conn.rooms as r_ic loop
 					if attached rooms.item (r_ic) as l then
 						l.prune_all (a_fd)
+					end
+					if attached sse_rooms.item (r_ic) as sl then
+						sl.prune_all (a_fd)
 					end
 				end
 				conn.mark_closed

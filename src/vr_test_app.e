@@ -6,6 +6,7 @@ class
 
 inherit
 	VR_REACTOR_CONSTANTS
+	VR_SSE_CONSTANTS
 
 create
 	make
@@ -72,7 +73,25 @@ feature {NONE} -- Initialization
 			io.put_string ("[vr_test_app] Testing Phase 5 WebSocket metrics and fast-path direct write...%N")
 			test_end_to_end_ws_metrics
 
-			io.put_string ("[vr_test_app] All Eiffel Phase 3, Phase 4, and Phase 5 tests passed successfully!%N")
+			io.put_string ("[vr_test_app] Testing Phase 6 SSE C codec primitives and ref-counted buffers...%N")
+			test_sse_codec_primitives
+
+			io.put_string ("[vr_test_app] Testing Phase 6 SSE handshake and retry directive...%N")
+			test_end_to_end_sse_handshake
+
+			io.put_string ("[vr_test_app] Testing Phase 6 HTTP POST /events broadcast to SSE subscribers...%N")
+			test_end_to_end_sse_post_publish
+
+			io.put_string ("[vr_test_app] Testing Phase 6 WebSocket to SSE cross-protocol bridge...%N")
+			test_end_to_end_ws_sse_bridge
+
+			io.put_string ("[vr_test_app] Testing Phase 6 unexpected inbound bytes discard on SSE stream...%N")
+			test_end_to_end_sse_inbound_discard
+
+			io.put_string ("[vr_test_app] Testing Phase 6 SSE client disconnect cleanup without ghost deliveries...%N")
+			test_end_to_end_sse_disconnect_cleanup
+
+			io.put_string ("[vr_test_app] All Eiffel Phase 3, Phase 4, Phase 5, and Phase 6 tests passed successfully!%N")
 		end
 
 feature {NONE} -- Tests
@@ -1192,6 +1211,366 @@ feature {NONE} -- SCOOP Helpers
 			-- Shutdown reactor.
 		do
 			r.shutdown
+		end
+
+feature {NONE} -- Phase 6 SSE Tests & Helpers
+
+	test_sse_codec_primitives
+			-- T6.1: Verify C SSE formatting (single/multi-line, CRLF stripping) and ref-counted buffers.
+		local
+			buf: MANAGED_POINTER
+			id_str, ev_str, dt_str: STRING_8
+			c_id, c_ev, c_dt: ANY
+			n: INTEGER
+			out_str: STRING_8
+			msg: POINTER
+			data_ptr: POINTER
+			sz: INTEGER
+		do
+			create buf.make (512)
+
+			-- 1a. Single-line with id & event
+			id_str := "42"
+			ev_str := "greeting"
+			dt_str := "hello world"
+			c_id := id_str.to_c
+			c_ev := ev_str.to_c
+			c_dt := dt_str.to_c
+			n := {VR_REACTOR_BRIDGE}.c_sse_format_event ($c_id, id_str.count, $c_ev, ev_str.count, $c_dt, dt_str.count, buf.item, buf.count)
+			check sse_single_line_ok: n > 0 end
+			buf.put_integer_8 (0, n)
+			out_str := (create {C_STRING}.make_by_pointer (buf.item)).string
+			check sse_single_line_str: out_str.same_string ("id: 42%Nevent: greeting%Ndata: hello world%N%N") end
+
+			-- 1b. Multi-line with \n
+			dt_str := "line1%Nline2%Nline3"
+			c_dt := dt_str.to_c
+			n := {VR_REACTOR_BRIDGE}.c_sse_format_event (default_pointer, 0, default_pointer, 0, $c_dt, dt_str.count, buf.item, buf.count)
+			check sse_multi_line_ok: n > 0 end
+			buf.put_integer_8 (0, n)
+			out_str := (create {C_STRING}.make_by_pointer (buf.item)).string
+			check sse_multi_line_str: out_str.same_string ("data: line1%Ndata: line2%Ndata: line3%N%N") end
+
+			-- 1c. CRLF injection stripping in id and event
+			id_str := "id%R%N1"
+			ev_str := "ev%Nent"
+			dt_str := "safe"
+			c_id := id_str.to_c
+			c_ev := ev_str.to_c
+			c_dt := dt_str.to_c
+			n := {VR_REACTOR_BRIDGE}.c_sse_format_event ($c_id, id_str.count, $c_ev, ev_str.count, $c_dt, dt_str.count, buf.item, buf.count)
+			check sse_crlf_strip_ok: n > 0 end
+			buf.put_integer_8 (0, n)
+			out_str := (create {C_STRING}.make_by_pointer (buf.item)).string
+			check sse_crlf_stripped: out_str.same_string ("id: id1%Nevent: event%Ndata: safe%N%N") end
+
+			-- 1d. Ref-counted message creation and unref
+			id_str := "100"
+			ev_str := "msg"
+			dt_str := "payload"
+			c_id := id_str.to_c
+			c_ev := ev_str.to_c
+			c_dt := dt_str.to_c
+			msg := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, id_str.count, $c_ev, ev_str.count, $c_dt, dt_str.count, 2)
+			check sse_msg_created: msg /= default_pointer end
+			sz := {VR_REACTOR_BRIDGE}.c_ws_msg_size (msg)
+			check sse_msg_sz: sz > 0 end
+			data_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_data (msg)
+			check sse_data_ptr: data_ptr /= default_pointer end
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (msg)
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (msg)
+		end
+
+	test_end_to_end_sse_handshake
+			-- T6.2: Verify GET /events returns 200 OK text/event-stream headers and retry directive.
+		local
+			r: separate VR_REACTOR
+			c1, res, i: INTEGER
+			m: VR_METRICS
+			resp: STRING_8
+		do
+			create r.make (Test_port + 13, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 13)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 1 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_sse_request (c1, "99")
+			resp := read_response_str (c1, r, 50)
+			check sse_resp_200: resp.has_substring ("HTTP/1.1 200 OK") end
+			check sse_resp_ct: resp.has_substring ("Content-Type: text/event-stream") end
+			check sse_resp_cc: resp.has_substring ("Cache-Control: no-cache") end
+			check sse_resp_conn: resp.has_substring ("Connection: keep-alive") end
+			check sse_resp_accel: resp.has_substring ("X-Accel-Buffering: no") end
+			check sse_resp_retry: resp.has_substring ("retry: 3000") end
+
+			m.refresh (get_native_handle (r))
+			check sse_stream_counted: m.sse_streams_total >= 1 end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_sse_post_publish
+			-- T6.4: Connect 2 SSE clients, publish via HTTP POST /events, verify both receive broadcast.
+		local
+			r: separate VR_REACTOR
+			c1, c2, pub, res, i: INTEGER
+			m: VR_METRICS
+			resp1, resp2, resp_pub, evt1, evt2: STRING_8
+		do
+			create r.make (Test_port + 14, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 14)
+			c2 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 14)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c2)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_sse_request (c1, "")
+			send_sse_request (c2, "")
+			resp1 := read_response_str (c1, r, 50)
+			resp2 := read_response_str (c2, r, 50)
+			check c1_open: resp1.has_substring ("200 OK") end
+			check c2_open: resp2.has_substring ("200 OK") end
+
+			-- Publisher sends POST /events
+			pub := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 14)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (pub)
+			from i := 0 until i >= 20 or m.accepts_total >= 3 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_http_post (pub, "/events", "Hello SSE Broadcast")
+			resp_pub := read_response_str (pub, r, 30)
+			check pub_accepted: resp_pub.has_substring ("202 Accepted") end
+
+			evt1 := read_response_str (c1, r, 20)
+			evt2 := read_response_str (c2, r, 20)
+			check evt1_ok: evt1.has_substring ("data: Hello SSE Broadcast") end
+			check evt2_ok: evt2.has_substring ("data: Hello SSE Broadcast") end
+
+			m.refresh (get_native_handle (r))
+			check sse_events_counted: m.sse_events_out_total >= 2 end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			res := {VR_REACTOR_BRIDGE}.c_close (c2)
+			res := {VR_REACTOR_BRIDGE}.c_close (pub)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_ws_sse_bridge
+			-- T6.4b: Cross-protocol publishing from WebSocket (PUB_SSE) to SSE subscribers.
+		local
+			r: separate VR_REACTOR
+			c_sse, c_ws, res, i: INTEGER
+			m: VR_METRICS
+			resp_sse, resp_ws, evt: STRING_8
+		do
+			create r.make (Test_port + 15, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c_sse := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 15)
+			c_ws := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 15)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c_sse)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c_ws)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			-- SSE client connects
+			send_sse_request (c_sse, "")
+			resp_sse := read_response_str (c_sse, r, 50)
+			check sse_ok: resp_sse.has_substring ("200 OK") end
+
+			-- WS client upgrades
+			send_ws_upgrade (c_ws, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			resp_ws := read_response_str (c_ws, r, 50)
+			check ws_upgraded: resp_ws.has_substring ("101 Switching Protocols") end
+
+			-- WS client publishes to SSE via PUB_SSE
+			send_client_ws_frame (c_ws, True, Ws_opcode_text, "PUB_SSE CrossProtocolBridge", True)
+
+			evt := read_response_str (c_sse, r, 20)
+			check bridge_evt_ok: evt.has_substring ("data: CrossProtocolBridge") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c_sse)
+			res := {VR_REACTOR_BRIDGE}.c_close (c_ws)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_sse_inbound_discard
+			-- T6.6: Verify unexpected inbound bytes on active SSE connection are discarded without breaking stream.
+		local
+			r: separate VR_REACTOR
+			c_sse, pub, res, i: INTEGER
+			m: VR_METRICS
+			resp_sse, resp_pub, evt: STRING_8
+			junk: STRING_8
+			cs: C_STRING
+		do
+			create r.make (Test_port + 16, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c_sse := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 16)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c_sse)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 1 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_sse_request (c_sse, "")
+			resp_sse := read_response_str (c_sse, r, 50)
+			check sse_open: resp_sse.has_substring ("200 OK") end
+
+			-- Client sends unexpected inbound data
+			junk := "MALICIOUS_OR_BUGGY_INBOUND_DATA_THAT_MUST_BE_DISCARDED"
+			create cs.make (junk)
+			res := {VR_REACTOR_BRIDGE}.c_send (c_sse, cs.item, cs.count)
+			check sent_junk: res = cs.count end
+
+			step_reactor (r, 50)
+			step_reactor (r, 50)
+
+			-- Now publish an event via POST /events to verify stream is still operational
+			pub := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 16)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (pub)
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_http_post (pub, "/events", "StillAliveAfterDiscard")
+			resp_pub := read_response_str (pub, r, 30)
+			check pub_ok: resp_pub.has_substring ("202 Accepted") end
+
+			evt := read_response_str (c_sse, r, 20)
+			check sse_alive: evt.has_substring ("data: StillAliveAfterDiscard") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c_sse)
+			res := {VR_REACTOR_BRIDGE}.c_close (pub)
+			shutdown_reactor (r)
+		end
+
+	test_end_to_end_sse_disconnect_cleanup
+			-- T6.5: Verify abrupt client disconnect removes from sse_rooms without ghost deliveries.
+		local
+			r: separate VR_REACTOR
+			c1, c2, c3, pub, res, i: INTEGER
+			m: VR_METRICS
+			resp1, resp2, resp3, resp_pub, evt1, evt3: STRING_8
+		do
+			create r.make (Test_port + 17, 4)
+			check listening: is_reactor_listening (r) end
+			create m.make_from_pointer (get_native_handle (r))
+
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 17)
+			c2 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 17)
+			c3 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 17)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c2)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c3)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 3 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_sse_request (c1, "")
+			send_sse_request (c2, "")
+			send_sse_request (c3, "")
+			resp1 := read_response_str (c1, r, 50)
+			resp2 := read_response_str (c2, r, 50)
+			resp3 := read_response_str (c3, r, 50)
+			check c1_open: resp1.has_substring ("200 OK") end
+			check c2_open: resp2.has_substring ("200 OK") end
+			check c3_open: resp3.has_substring ("200 OK") end
+
+			-- Abruptly close c2
+			res := {VR_REACTOR_BRIDGE}.c_close (c2)
+			step_reactor (r, 50)
+			step_reactor (r, 50)
+
+			-- Publish event to room
+			pub := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 17)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (pub)
+			from i := 0 until i >= 20 or m.accepts_total >= 4 loop
+				step_reactor (r, 50)
+				m.refresh (get_native_handle (r))
+				i := i + 1
+			end
+
+			send_http_post (pub, "/events", "SurvivingClientsOnly")
+			resp_pub := read_response_str (pub, r, 30)
+			check pub_ok: resp_pub.has_substring ("202 Accepted") end
+
+			evt1 := read_response_str (c1, r, 20)
+			evt3 := read_response_str (c3, r, 20)
+			check evt1_ok: evt1.has_substring ("data: SurvivingClientsOnly") end
+			check evt3_ok: evt3.has_substring ("data: SurvivingClientsOnly") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			res := {VR_REACTOR_BRIDGE}.c_close (c3)
+			res := {VR_REACTOR_BRIDGE}.c_close (pub)
+			shutdown_reactor (r)
+		end
+
+	send_sse_request (a_sock: INTEGER; a_last_id: STRING_8)
+			-- Send HTTP/1.1 SSE request.
+		local
+			req: STRING_8
+			cs: C_STRING
+			res: INTEGER
+		do
+			create req.make (256)
+			req.append ("GET /events HTTP/1.1%R%NHost: localhost%R%NAccept: text/event-stream%R%N")
+			if not a_last_id.is_empty then
+				req.append ("Last-Event-ID: " + a_last_id + "%R%N")
+			end
+			req.append ("%R%N")
+			create cs.make (req)
+			res := {VR_REACTOR_BRIDGE}.c_send (a_sock, cs.item, cs.count)
+			check sent_sse_req: res = cs.count end
+		end
+
+	send_http_post (a_sock: INTEGER; a_path, a_body: STRING_8)
+			-- Send HTTP/1.1 POST request with body.
+		local
+			req: STRING_8
+			cs: C_STRING
+			res: INTEGER
+		do
+			create req.make (256 + a_body.count)
+			req.append ("POST " + a_path + " HTTP/1.1%R%NHost: localhost%R%NContent-Length: " + a_body.count.out + "%R%N%R%N" + a_body)
+			create cs.make (req)
+			res := {VR_REACTOR_BRIDGE}.c_send (a_sock, cs.item, cs.count)
+			check sent_post_req: res = cs.count end
 		end
 
 feature {NONE} -- Constants

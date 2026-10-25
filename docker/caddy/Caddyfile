@@ -4,6 +4,14 @@
 }
 
 :80 {
+    # Disable proxy buffering for Server-Sent Events
+    @sse {
+        path /events*
+    }
+    reverse_proxy @sse server:8080 {
+        flush_interval -1
+    }
+
     reverse_proxy server:8080 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}

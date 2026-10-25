@@ -9,7 +9,7 @@ TEST_BIN = test_vr_reactor
 
 all: $(TARGET_LIB) $(TEST_BIN) libreactor_bridge.a test_reactor
 
-$(TARGET_LIB): vr_reactor_epoll.o vr_ws_codec.o
+$(TARGET_LIB): vr_reactor_epoll.o vr_ws_codec.o vr_sse_codec.o
 	$(AR) rcs $@ $^
 
 libreactor_bridge.a: $(TARGET_LIB)
@@ -20,6 +20,9 @@ vr_reactor_epoll.o: vr_reactor_epoll.c vr_reactor_bridge.h
 
 vr_ws_codec.o: vr_ws_codec.c vr_reactor_bridge.h
 	$(CC) $(CFLAGS) -c vr_ws_codec.c -o $@
+
+vr_sse_codec.o: vr_sse_codec.c vr_reactor_bridge.h
+	$(CC) $(CFLAGS) -c vr_sse_codec.c -o $@
 
 $(TEST_BIN): test_vr_reactor.c $(TARGET_LIB)
 	$(CC) $(CFLAGS) test_vr_reactor.c -L. -lvr_reactor_bridge -o $@

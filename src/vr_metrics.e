@@ -58,6 +58,18 @@ feature -- Access
 	ws_dropped_backpressure_total: NATURAL_64
 			-- Cumulative total frames dropped due to subscriber buffer backpressure
 
+	sse_streams_total: NATURAL_64
+			-- Cumulative total active Server-Sent Events streams opened
+
+	sse_events_out_total: NATURAL_64
+			-- Cumulative total SSE events transmitted to clients
+
+	sse_heartbeats_total: NATURAL_64
+			-- Cumulative total SSE comment heartbeats transmitted
+
+	sse_dropped_backpressure_total: NATURAL_64
+			-- Cumulative total SSE events dropped due to client backpressure
+
 feature -- Status Report
 
 	refresh (a_handle: POINTER)
@@ -80,6 +92,10 @@ feature -- Status Report
 			ws_frames_in_total := buf.read_natural_64 (64)
 			ws_frames_out_total := buf.read_natural_64 (72)
 			ws_dropped_backpressure_total := buf.read_natural_64 (80)
+			sse_streams_total := buf.read_natural_64 (88)
+			sse_events_out_total := buf.read_natural_64 (96)
+			sse_heartbeats_total := buf.read_natural_64 (104)
+			sse_dropped_backpressure_total := buf.read_natural_64 (112)
 		end
 
 feature -- Output
@@ -98,7 +114,11 @@ feature -- Output
 			Result.append (", ws_upgrades=" + ws_upgrades_total.out)
 			Result.append (", ws_in=" + ws_frames_in_total.out)
 			Result.append (", ws_out=" + ws_frames_out_total.out)
-			Result.append (", ws_dropped=" + ws_dropped_backpressure_total.out + "]")
+			Result.append (", ws_dropped=" + ws_dropped_backpressure_total.out)
+			Result.append (", sse_streams=" + sse_streams_total.out)
+			Result.append (", sse_out=" + sse_events_out_total.out)
+			Result.append (", sse_hb=" + sse_heartbeats_total.out)
+			Result.append (", sse_dropped=" + sse_dropped_backpressure_total.out + "]")
 		end
 
 end

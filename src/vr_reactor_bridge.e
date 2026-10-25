@@ -368,8 +368,58 @@ feature -- Atomic Metrics
 			instance_free: class
 		end
 
+	c_metric_inc_sse_streams (r: POINTER)
+			-- Increment total active SSE streams counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_sse_streams((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_sse_events_out (r: POINTER)
+			-- Increment total outbound SSE events counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_sse_events_out((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_sse_heartbeats (r: POINTER)
+			-- Increment total SSE comment heartbeats counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_sse_heartbeats((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_sse_dropped (r: POINTER)
+			-- Increment total SSE events dropped due to backpressure.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_sse_dropped((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_set_tcp_user_timeout (fd: INTEGER; timeout_ms: NATURAL_32): INTEGER
+			-- Configure TCP_USER_TIMEOUT socket option.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_set_tcp_user_timeout((int) $fd, (unsigned int) $timeout_ms);"
+		ensure
+			instance_free: class
+		end
+
 	c_reactor_get_metrics (r, out_buf: POINTER)
-			-- Snapshot metrics into `out_buf` (must be at least 88 bytes).
+			-- Snapshot metrics into `out_buf` (must be at least 120 bytes).
 		external
 			"C inline use %"vr_reactor_bridge.h%""
 		alias
@@ -458,6 +508,39 @@ feature -- Phase 5 WebSocket Primitives
 			"C inline"
 		alias
 			"return (EIF_BOOLEAN) ($len >= 4 && ((const char *)$ptr)[0] == 'P' && ((const char *)$ptr)[1] == 'U' && ((const char *)$ptr)[2] == 'B' && ((const char *)$ptr)[3] == ' ');"
+		ensure
+			instance_free: class
+		end
+
+feature -- Phase 6 Server-Sent Events (SSE) Primitives
+
+	c_sse_format_event (id: POINTER; id_len: INTEGER; event: POINTER; event_len: INTEGER; data: POINTER; data_len: INTEGER; out_buf: POINTER; out_cap: INTEGER): INTEGER
+			-- Format an SSE event into `out_buf` (up to `out_cap` bytes).
+			-- Returns bytes written, or -1 if capacity is insufficient.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_sse_format_event((const char *) $id, (size_t) $id_len, (const char *) $event, (size_t) $event_len, (const char *) $data, (size_t) $data_len, (char *) $out_buf, (size_t) $out_cap);"
+		ensure
+			instance_free: class
+		end
+
+	c_sse_msg_create (id: POINTER; id_len: INTEGER; event: POINTER; event_len: INTEGER; data: POINTER; data_len: INTEGER; initial_refs: INTEGER): POINTER
+			-- Allocate immutable reference-counted pre-framed SSE broadcast message buffer.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_POINTER) vr_sse_msg_create((const char *) $id, (size_t) $id_len, (const char *) $event, (size_t) $event_len, (const char *) $data, (size_t) $data_len, (int) $initial_refs);"
+		ensure
+			instance_free: class
+		end
+
+	c_has_pub_sse_prefix (ptr: POINTER; len: INTEGER): BOOLEAN
+			-- Does memory slice begin with ASCII "PUB_SSE "?
+		external
+			"C inline"
+		alias
+			"return (EIF_BOOLEAN) ($len >= 8 && ((const char *)$ptr)[0] == 'P' && ((const char *)$ptr)[1] == 'U' && ((const char *)$ptr)[2] == 'B' && ((const char *)$ptr)[3] == '_' && ((const char *)$ptr)[4] == 'S' && ((const char *)$ptr)[5] == 'S' && ((const char *)$ptr)[6] == 'E' && ((const char *)$ptr)[7] == ' ');"
 		ensure
 			instance_free: class
 		end

@@ -31,6 +31,11 @@ struct vr_reactor {
     uint64_t ws_frames_in_total;
     uint64_t ws_frames_out_total;
     uint64_t ws_dropped_backpressure_total;
+    /* Phase 6 SSE metrics */
+    uint64_t sse_streams_total;
+    uint64_t sse_events_out_total;
+    uint64_t sse_heartbeats_total;
+    uint64_t sse_dropped_backpressure_total;
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
 
@@ -379,6 +384,40 @@ void vr_reactor_metric_inc_ws_dropped(vr_reactor_t *r) {
     }
 }
 
+void vr_reactor_metric_inc_sse_streams(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->sse_streams_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_sse_events_out(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->sse_events_out_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_sse_heartbeats(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->sse_heartbeats_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void vr_reactor_metric_inc_sse_dropped(vr_reactor_t *r) {
+    if (r) {
+        __atomic_add_fetch(&r->sse_dropped_backpressure_total, 1, __ATOMIC_RELAXED);
+    }
+}
+
+int vr_reactor_set_tcp_user_timeout(int fd, unsigned int timeout_ms) {
+#if defined(TCP_USER_TIMEOUT)
+    return setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout_ms, sizeof(timeout_ms));
+#else
+    (void)fd;
+    (void)timeout_ms;
+    return 0;
+#endif
+}
+
 void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
     if (r && out) {
         out->active_connections  = __atomic_load_n(&r->active_connections, __ATOMIC_RELAXED);
@@ -392,5 +431,9 @@ void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
         out->ws_frames_in_total   = __atomic_load_n(&r->ws_frames_in_total, __ATOMIC_RELAXED);
         out->ws_frames_out_total  = __atomic_load_n(&r->ws_frames_out_total, __ATOMIC_RELAXED);
         out->ws_dropped_backpressure_total = __atomic_load_n(&r->ws_dropped_backpressure_total, __ATOMIC_RELAXED);
+        out->sse_streams_total             = __atomic_load_n(&r->sse_streams_total, __ATOMIC_RELAXED);
+        out->sse_events_out_total          = __atomic_load_n(&r->sse_events_out_total, __ATOMIC_RELAXED);
+        out->sse_heartbeats_total          = __atomic_load_n(&r->sse_heartbeats_total, __ATOMIC_RELAXED);
+        out->sse_dropped_backpressure_total = __atomic_load_n(&r->sse_dropped_backpressure_total, __ATOMIC_RELAXED);
     }
 }

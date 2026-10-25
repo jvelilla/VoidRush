@@ -6,6 +6,7 @@ class
 
 inherit
 	VR_REACTOR_CONSTANTS
+	VR_SSE_CONSTANTS
 
 create
 	make,
@@ -74,6 +75,8 @@ feature {NONE} -- Initialization
 			frag_opcode := 0
 			client_ip := "127.0.0.1"
 			client_port := 0
+			last_sse_heartbeat_ms := 0
+			create last_sse_event_id.make_empty
 		ensure
 			fd_set: fd = a_fd
 			generation_set: generation = a_generation
@@ -139,6 +142,18 @@ feature -- Access
 
 	room_join_handler: detachable PROCEDURE [INTEGER, INTEGER]
 			-- Callback into worker when socket joins a room (fd, room)
+
+	last_sse_heartbeat_ms: NATURAL_64
+			-- Monotonic timestamp when the last heartbeat was successfully written
+
+	last_sse_event_id: STRING_8
+			-- Last processed or received event ID for reconnection resumption
+
+	sse_broadcast_handler: detachable PROCEDURE [INTEGER, POINTER, INTEGER]
+			-- Callback into worker to broadcast SSE message across workers (room, ptr, len)
+
+	sse_room_join_handler: detachable PROCEDURE [INTEGER, INTEGER]
+			-- Callback into worker when socket joins an SSE room (fd, room)
 
 	reactor_handle: POINTER
 			-- Native reactor handle for atomic metrics updates
@@ -291,6 +306,62 @@ feature -- State Modifiers
 			handler_set: room_join_handler = a_handler
 		end
 
+	set_sse_broadcast_handler (a_handler: PROCEDURE [INTEGER, POINTER, INTEGER])
+			-- Set worker callback for SSE broadcast publishing.
+		require
+			valid_handler: a_handler /= Void
+		do
+			sse_broadcast_handler := a_handler
+		ensure
+			handler_set: sse_broadcast_handler = a_handler
+		end
+
+	set_sse_room_join_handler (a_handler: PROCEDURE [INTEGER, INTEGER])
+			-- Set worker callback for SSE room joining.
+		require
+			valid_handler: a_handler /= Void
+		do
+			sse_room_join_handler := a_handler
+		ensure
+			handler_set: sse_room_join_handler = a_handler
+		end
+
+	set_last_sse_heartbeat_ms (a_time: NATURAL_64)
+			-- Update heartbeat timestamp after a successful heartbeat write.
+		require
+			valid_time: a_time > 0
+		do
+			last_sse_heartbeat_ms := a_time
+		ensure
+			time_set: last_sse_heartbeat_ms = a_time
+		end
+
+	start_sse (a_last_event_id: detachable STRING_8; a_now_ms: NATURAL_64)
+			-- Transition connection to Proto_sse_open and queue 200 OK headers.
+		require
+			is_open: is_open
+			valid_time: a_now_ms > 0
+		do
+			proto_state := Proto_sse_open
+			last_sse_heartbeat_ms := a_now_ms
+			if attached a_last_event_id as lid then
+				last_sse_event_id := lid.twin
+			else
+				create last_sse_event_id.make_empty
+			end
+			append_outbound_string (Sse_handshake_headers)
+			if attached sse_room_join_handler as sjh then
+				sjh.call ([fd, Room_default])
+			end
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_metric_inc_sse_streams (reactor_handle)
+			end
+		ensure
+			state_set: proto_state = Proto_sse_open
+			heartbeat_initialized: last_sse_heartbeat_ms = a_now_ms
+			out_buf_has_headers: out_buf_bytes >= Sse_handshake_headers.count
+		end
+
 	set_reactor_handle (a_handle: POINTER)
 			-- Associate native reactor handle for metrics tracking.
 		do
@@ -397,6 +468,26 @@ feature {NONE} -- Inbound Protocol Pipeline
 								process_websocket_frames (a_now_ms)
 							end
 							done := (proto_state /= Proto_ws_open)
+						elseif http_parser.is_sse_request (in_buf) then
+							process_sse_handshake (a_now_ms)
+							done := True
+						elseif http_parser.is_sse_publish_request (in_buf) then
+							if http_parser.content_length > 0 then
+								proto_state := Proto_http_reading_body
+								if in_buf_bytes >= http_parser.content_length then
+									process_http_body (a_now_ms)
+								else
+									done := True
+								end
+							else
+								append_outbound_string (Sse_accepted_post_response)
+								if not http_parser.is_keep_alive then
+									mark_closing
+									done := True
+								else
+									http_parser.reset
+								end
+							end
 						else
 							handle_http_request (a_now_ms)
 
@@ -421,12 +512,68 @@ feature {NONE} -- Inbound Protocol Pipeline
 						end
 						done := True
 					end
+				elseif proto_state = Proto_http_reading_body then
+					if in_buf_bytes >= http_parser.content_length then
+						process_http_body (a_now_ms)
+					else
+						done := True
+					end
 				elseif proto_state = Proto_ws_open then
 					process_websocket_frames (a_now_ms)
+					done := True
+				elseif proto_state = Proto_sse_open then
+					-- SSE is strictly server-to-client; drain and discard unexpected inbound data
+					in_read_offset := 0
+					in_write_offset := 0
 					done := True
 				else
 					done := True
 				end
+			end
+		end
+
+	process_sse_handshake (a_now_ms: NATURAL_64)
+			-- Establish WHATWG Server-Sent Events stream.
+		local
+			lid: STRING_8
+		do
+			if not http_parser.last_event_id_slice.is_empty then
+				lid := http_parser.last_event_id_slice.to_string_8 (in_buf)
+			else
+				create lid.make_empty
+			end
+			start_sse (lid, a_now_ms)
+		end
+
+	process_http_body (a_now_ms: NATURAL_64)
+			-- Process request body for POST endpoints (e.g. POST /events publish).
+		local
+			body_ptr: POINTER
+			body_len: INTEGER
+		do
+			body_len := http_parser.content_length
+			body_ptr := in_buf.item + in_read_offset
+			in_read_offset := in_read_offset + body_len
+			if in_read_offset = in_write_offset then
+				in_read_offset := 0
+				in_write_offset := 0
+			end
+
+			if attached sse_broadcast_handler as sbh then
+				sbh.call ([Room_default, body_ptr, body_len])
+			end
+
+			append_outbound_string (Sse_accepted_post_response)
+			if not http_parser.is_keep_alive then
+				mark_closing
+			else
+				proto_state := Proto_http_reading_headers
+				if in_buf_bytes = 0 then
+					request_started_ms := 0
+				else
+					request_started_ms := a_now_ms
+				end
+				http_parser.reset
 			end
 		end
 
@@ -551,11 +698,14 @@ feature {NONE} -- Inbound Protocol Pipeline
 		local
 			hdr: MANAGED_POINTER
 			hdr_len: INTEGER
-			is_pub: BOOLEAN
+			is_pub, is_pub_sse: BOOLEAN
 		do
 			is_pub := {VR_REACTOR_BRIDGE}.c_has_pub_prefix (a_data, a_len)
+			is_pub_sse := {VR_REACTOR_BRIDGE}.c_has_pub_sse_prefix (a_data, a_len)
 			if is_pub and attached broadcast_handler as bh then
 				bh.call ([Room_default, a_opcode, a_data + 4, a_len - 4])
+			elseif is_pub_sse and attached sse_broadcast_handler as sbh then
+				sbh.call ([Room_default, a_data + 8, a_len - 8])
 			else
 				-- Echo frame back to client
 				create hdr.make (10)

@@ -89,6 +89,9 @@ feature -- Protocol Sub-States (Phase 4)
 	Proto_ws_closing: INTEGER = 5
 			-- Awaiting or sending terminal WebSocket Close frame
 
+	Proto_sse_open: INTEGER = 6
+			-- Active WHATWG Server-Sent Events stream
+
 feature -- WebSocket Opcodes (RFC 6455 §5.2)
 
 	Ws_opcode_continuation: INTEGER = 0x0
@@ -153,7 +156,7 @@ feature -- Buffer and Pool Configuration
 	Default_backlog: INTEGER = 1024
 			-- Default TCP listen queue backlog
 
-	Metrics_size: INTEGER = 88
-			-- Size in bytes of vr_reactor_metrics_t (11 * uint64_t)
+	Metrics_size: INTEGER = 120
+			-- Size in bytes of vr_reactor_metrics_t (15 * uint64_t)
 
 end

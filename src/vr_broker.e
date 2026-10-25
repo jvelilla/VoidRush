@@ -61,6 +61,25 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 			end
 		end
 
+	publish_sse (a_room_id: INTEGER; a_msg_handle: POINTER)
+			-- Broadcast SSE message `a_msg_handle` across all worker shards for `a_room_id`.
+		require
+			valid_room: a_room_id >= 0
+			valid_msg: a_msg_handle /= default_pointer
+			active: not is_shutdown
+		local
+			i: INTEGER
+		do
+			from
+				i := 0
+			until
+				i >= workers.count
+			loop
+				dispatch_sse_room_publish (workers.item (i), a_room_id, a_msg_handle)
+				i := i + 1
+			end
+		end
+
 	shutdown
 			-- Mark broker terminated during reactor teardown barrier.
 		do
@@ -78,6 +97,12 @@ feature {NONE} -- Implementation
 			-- Asynchronous command passing basic value types to controlled worker.
 		do
 			a_worker.on_room_publish (a_room_id, a_msg_handle)
+		end
+
+	dispatch_sse_room_publish (a_worker: separate VR_WORKER; a_room_id: INTEGER; a_msg_handle: POINTER)
+			-- Asynchronous command passing basic value types to controlled worker.
+		do
+			a_worker.on_sse_room_publish (a_room_id, a_msg_handle)
 		end
 
 end

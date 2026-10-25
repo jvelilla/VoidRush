@@ -30,8 +30,8 @@ int main(void) {
     /* wake_fd should be consumed internally, returning 0 user events */
     assert(n == 0);
 
-    /* Test metrics (88 bytes) */
-    assert(sizeof(vr_reactor_metrics_t) == 88);
+    /* Test metrics (120 bytes) */
+    assert(sizeof(vr_reactor_metrics_t) == 120);
     vr_reactor_metric_inc_accept(r);
     vr_reactor_metric_inc_open(r);
     vr_reactor_metric_inc_events(r, 5);
@@ -43,6 +43,10 @@ int main(void) {
     vr_reactor_metric_inc_ws_frames_in(r);
     vr_reactor_metric_inc_ws_frames_out(r);
     vr_reactor_metric_inc_ws_dropped(r);
+    vr_reactor_metric_inc_sse_streams(r);
+    vr_reactor_metric_inc_sse_events_out(r);
+    vr_reactor_metric_inc_sse_heartbeats(r);
+    vr_reactor_metric_inc_sse_dropped(r);
 
     vr_reactor_metrics_t metrics;
     vr_reactor_get_metrics(r, &metrics);
@@ -57,6 +61,10 @@ int main(void) {
     assert(metrics.ws_frames_in_total == 1);
     assert(metrics.ws_frames_out_total == 1);
     assert(metrics.ws_dropped_backpressure_total == 1);
+    assert(metrics.sse_streams_total == 1);
+    assert(metrics.sse_events_out_total == 1);
+    assert(metrics.sse_heartbeats_total == 1);
+    assert(metrics.sse_dropped_backpressure_total == 1);
 
     vr_reactor_metric_dec_open(r);
     vr_reactor_get_metrics(r, &metrics);
@@ -273,6 +281,54 @@ int main(void) {
     vr_ws_msg_unref(ws_msg);
     /* Second unref frees the buffer */
     vr_ws_msg_unref(ws_msg);
+
+    /* 8. Phase 6 Server-Sent Events (SSE) Tests */
+    printf("[test_vr_reactor] 8. Testing Phase 6 SSE formatting and ref-counted messages...\n");
+
+    /* 8a. Single-line formatting with id and event */
+    char sse_buf[512];
+    int slen = vr_sse_format_event("42", 2, "greeting", 8, "hello world", 11, sse_buf, sizeof(sse_buf));
+    assert(slen > 0);
+    sse_buf[slen] = '\0';
+    assert(strcmp(sse_buf, "id: 42\nevent: greeting\ndata: hello world\n\n") == 0);
+
+    /* 8b. Multi-line formatting with '\n' */
+    slen = vr_sse_format_event(NULL, 0, NULL, 0, "line1\nline2\nline3", 17, sse_buf, sizeof(sse_buf));
+    assert(slen > 0);
+    sse_buf[slen] = '\0';
+    assert(strcmp(sse_buf, "data: line1\ndata: line2\ndata: line3\n\n") == 0);
+
+    /* 8c. Multi-line formatting with '\r\n' */
+    slen = vr_sse_format_event(NULL, 0, NULL, 0, "first\r\nsecond\r\n", 15, sse_buf, sizeof(sse_buf));
+    assert(slen > 0);
+    sse_buf[slen] = '\0';
+    assert(strcmp(sse_buf, "data: first\ndata: second\n\n") == 0);
+
+    /* 8d. CRLF Injection stripping in id: and event: */
+    slen = vr_sse_format_event("id\r\n1", 5, "ev\nent", 6, "safe", 4, sse_buf, sizeof(sse_buf));
+    assert(slen > 0);
+    sse_buf[slen] = '\0';
+    assert(strcmp(sse_buf, "id: id1\nevent: event\ndata: safe\n\n") == 0);
+
+    /* 8e. Ref-counted broadcast message */
+    vr_ws_msg_t *sse_msg = vr_sse_msg_create("100", 3, "msg", 3, "fanout test", 11, 2);
+    assert(sse_msg != NULL);
+    assert(vr_ws_msg_size(sse_msg) > 0);
+    const uint8_t *sdata = vr_ws_msg_data(sse_msg);
+    assert(sdata != NULL);
+    assert(memcmp(sdata, "id: 100\nevent: msg\ndata: fanout test\n\n", vr_ws_msg_size(sse_msg)) == 0);
+
+    /* Ref count decrement and free */
+    vr_ws_msg_unref(sse_msg);
+    vr_ws_msg_unref(sse_msg);
+
+    /* 8f. TCP User Timeout helper */
+    int dummy_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (dummy_fd >= 0) {
+        int ures = vr_reactor_set_tcp_user_timeout(dummy_fd, 30000);
+        (void)ures; /* May succeed or return 0 depending on platform support */
+        close(dummy_fd);
+    }
 
     printf("[test_vr_reactor] All native VR reactor unit tests passed successfully!\n");
     return 0;
