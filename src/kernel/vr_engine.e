@@ -52,6 +52,14 @@ feature -- Execution
 			supervisor.start_all
 		end
 
+	run
+			-- Autonomous event loop until native shutdown signal is received.
+		require
+			running: supervisor.is_running
+		do
+			supervisor.run_loop
+		end
+
 	stop
 			-- Request ordered graceful shutdown of all children.
 		do

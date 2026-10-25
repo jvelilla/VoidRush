@@ -21,6 +21,7 @@ feature {NONE} -- Initialization
 			create engine.make (Default_port, Default_worker_count)
 			io.put_string ("VR_ENGINE initialized successfully. Entering event loop...%N")
 			engine.start
+			engine.run
 		end
 
 feature {NONE} -- Constants

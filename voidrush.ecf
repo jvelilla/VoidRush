@@ -25,4 +25,9 @@
 	<target name="voidrush_tests" extends="voidrush">
 		<root class="VR_TEST_APP" feature="make"/>
 	</target>
+
+	<target name="voidrush_example" extends="voidrush">
+		<root class="VR_TELEMETRY_APP" feature="make"/>
+		<cluster name="example" location="./example/src" recursive="true"/>
+	</target>
 </system>

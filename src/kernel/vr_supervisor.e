@@ -189,6 +189,22 @@ feature -- Lifecycle Coordination
 			check_health ({VR_REACTOR_BRIDGE}.c_reactor_now_ms)
 		end
 
+	run_loop
+			-- Autonomous supervision and event loop until shutdown or fatal intensity trip.
+		require
+			running: is_running
+		do
+			from
+			until
+				not is_running or is_fatal_shutdown or {VR_REACTOR_BRIDGE}.c_reactor_is_shutting_down (reactor_handle) /= 0
+			loop
+				step (100)
+			end
+			if is_running then
+				stop_all
+			end
+		end
+
 	stop_all
 			-- Deterministic reverse-order shutdown sequence.
 		local

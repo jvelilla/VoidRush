@@ -49,6 +49,21 @@ services:
       - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
     command: ["server"]
 
+  example:
+    container_name: voidrush-example
+    build:
+      context: ./images/tools/eiffel-compilation
+    image: voidrush/tool-eiffel-compilation
+    stdin_open: true
+    tty: true
+    ports:
+      - "4343:4343"
+    volumes:
+      - ./_build:/opt/eiffel/build:rw
+      - ..:/opt/eiffel/src:rw
+      - voidrush_eifgens_linux:/opt/eiffel/src/EIFGENs
+    command: ["example"]
+
   caddy-gate:
     container_name: voidrush-caddy-gate
     image: caddy:2-alpine

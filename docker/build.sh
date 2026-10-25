@@ -11,6 +11,7 @@ RESET=0
 SHELL_MODE=0
 NO_CACHE=0
 SERVER_MODE=0
+EXAMPLE_MODE=0
 C_TEST=0
 VALGRIND=0
 COMPILE_ONLY=0
@@ -22,6 +23,7 @@ while [[ "$#" -gt 0 ]]; do
         --shell|-shell|-s) SHELL_MODE=1 ;;
         --no-cache|-no-cache) NO_CACHE=1 ;;
         --server|-server) SERVER_MODE=1 ;;
+        --example|-example|-e) EXAMPLE_MODE=1 ;;
         --c-test|-c-test|-ct) C_TEST=1 ;;
         --valgrind|-valgrind|-v) VALGRIND=1 ;;
         --compile-only|-compile-only|-c) COMPILE_ONLY=1 ;;
@@ -93,6 +95,17 @@ if [ "$SERVER_MODE" -eq 1 ]; then
         -v "$SRC_ROOT:/opt/eiffel/src:rw" \
         -v "$VOLUME_NAME:/opt/eiffel/src/EIFGENs" \
         "$IMAGE_NAME" server
+    exit 0
+fi
+
+if [ "$EXAMPLE_MODE" -eq 1 ]; then
+    echo "Launching VoidRush Telemetry Example in container..."
+    docker run --rm -it \
+        -p "4343:4343" \
+        -v "$BUILD_DIR:/opt/eiffel/build:rw" \
+        -v "$SRC_ROOT:/opt/eiffel/src:rw" \
+        -v "$VOLUME_NAME:/opt/eiffel/src/EIFGENs" \
+        "$IMAGE_NAME" example
     exit 0
 fi
 

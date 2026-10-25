@@ -36,6 +36,7 @@ param (
     [switch]$CTest,
     [switch]$Valgrind,
     [switch]$Server,
+    [switch]$Example,
     [switch]$Shell,
     [switch]$CompileOnly,
     [switch]$Reset,
@@ -122,6 +123,17 @@ if ($Server) {
         -v "${SRC_ROOT}:/opt/eiffel/src:rw" `
         -v "${VolumeName}:/opt/eiffel/src/EIFGENs" `
         $ImageName server
+    exit 0
+}
+
+if ($Example) {
+    Write-Host "Launching VoidRush Telemetry Example in Linux container..."
+    docker run --rm -it `
+        -p "4343:4343" `
+        -v "${BUILD_DIR}:/opt/eiffel/build:rw" `
+        -v "${SRC_ROOT}:/opt/eiffel/src:rw" `
+        -v "${VolumeName}:/opt/eiffel/src/EIFGENs" `
+        $ImageName example
     exit 0
 }
 

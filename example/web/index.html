@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoidRush — Real-Time Telemetry & Chaos Gateway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #0a0d14;
+      --bg-surface: #111723;
+      --bg-surface-elevated: #182234;
+      --bg-surface-glass: rgba(17, 23, 35, 0.75);
+      --border-subtle: #1e293b;
+      --border-highlight: #334155;
+      
+      --accent-cyan: #06b6d4;
+      --accent-cyan-glow: rgba(6, 182, 212, 0.25);
+      --accent-emerald: #10b981;
+      --accent-emerald-glow: rgba(16, 185, 129, 0.25);
+      --accent-amber: #f59e0b;
+      --accent-amber-glow: rgba(245, 158, 11, 0.25);
+      --accent-rose: #f43f5e;
+      --accent-rose-glow: rgba(244, 63, 94, 0.25);
+      --accent-indigo: #6366f1;
+
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 15% 15%, rgba(6, 182, 212, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 85% 85%, rgba(99, 102, 241, 0.08) 0%, transparent 40%);
+    }
+
+    /* Header */
+    header {
+      background: var(--bg-surface-glass);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-logo {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 16px var(--accent-cyan-glow);
+      font-weight: 800;
+      font-family: var(--font-mono);
+      font-size: 1.1rem;
+      color: #fff;
+    }
+
+    .brand-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .badge-eiffel {
+      font-size: 0.65rem;
+      padding: 0.2rem 0.5rem;
+      background: rgba(6, 182, 212, 0.15);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      color: var(--accent-cyan);
+      border-radius: 9999px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+
+    .gateway-url-box {
+      display: flex;
+      align-items: center;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 0.35rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+
+    .gateway-url-box input {
+      background: transparent;
+      border: none;
+      color: var(--text-main);
+      outline: none;
+      font-family: inherit;
+      width: 170px;
+    }
+
+    .gateway-url-box label {
+      color: var(--text-dim);
+      margin-right: 0.5rem;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+    }
+
+    .status-dot.active {
+      background: var(--accent-emerald);
+      box-shadow: 0 0 10px var(--accent-emerald);
+    }
+
+    .status-dot.connecting {
+      background: var(--accent-amber);
+      box-shadow: 0 0 10px var(--accent-amber);
+    }
+
+    .status-dot.offline {
+      background: var(--accent-rose);
+      box-shadow: 0 0 10px var(--accent-rose);
+    }
+
+    /* Layout */
+    main {
+      padding: 2rem;
+      max-width: 1600px;
+      margin: 0 auto;
+      width: 100%;
+      display: grid;
+      grid-template-columns: 360px 1fr 340px;
+      gap: 1.5rem;
+      flex: 1;
+    }
+
+    @media (max-width: 1200px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .panel-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .panel-title-icon {
+      color: var(--accent-cyan);
+    }
+
+    /* Forms & Controls */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .form-label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    input[type="text"], input[type="number"], select {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-main);
+      padding: 0.6rem 0.75rem;
+      border-radius: 6px;
+      font-family: var(--font-sans);
+      font-size: 0.85rem;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 0 2px var(--accent-cyan-glow);
+    }
+
+    .btn {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85rem;
+      padding: 0.65rem 1rem;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+
+    .btn-primary {
+      background: var(--accent-cyan);
+      color: #041019;
+    }
+
+    .btn-primary:hover {
+      background: #22d3ee;
+      box-shadow: 0 0 14px var(--accent-cyan-glow);
+    }
+
+    .btn-danger {
+      background: rgba(244, 63, 94, 0.15);
+      border-color: rgba(244, 63, 94, 0.4);
+      color: var(--accent-rose);
+    }
+
+    .btn-danger:hover {
+      background: rgba(244, 63, 94, 0.25);
+      box-shadow: 0 0 14px var(--accent-rose-glow);
+    }
+
+    .btn-warning {
+      background: rgba(245, 158, 11, 0.15);
+      border-color: rgba(245, 158, 11, 0.4);
+      color: var(--accent-amber);
+    }
+
+    .btn-warning:hover {
+      background: rgba(245, 158, 11, 0.25);
+      box-shadow: 0 0 14px var(--accent-amber-glow);
+    }
+
+    .btn-secondary {
+      background: var(--bg-surface-elevated);
+      border-color: var(--border-subtle);
+      color: var(--text-main);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--border-highlight);
+      background: #202b40;
+    }
+
+    /* Live Event Feed (Center) */
+    .feed-container {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      height: 680px;
+    }
+
+    .feed-list {
+      flex: 1;
+      overflow-y: auto;
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+    }
+
+    .event-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-left: 3px solid var(--accent-cyan);
+      border-radius: 6px;
+      padding: 0.6rem 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    .event-card.ws-event {
+      border-left-color: var(--accent-indigo);
+    }
+
+    .event-card.fault-event {
+      border-left-color: var(--accent-rose);
+      background: rgba(244, 63, 94, 0.05);
+    }
+
+    .event-header {
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-dim);
+      font-size: 0.72rem;
+    }
+
+    .event-type-badge {
+      font-weight: 600;
+      color: var(--accent-cyan);
+    }
+
+    .event-card.ws-event .event-type-badge {
+      color: var(--accent-indigo);
+    }
+
+    .event-payload {
+      color: var(--text-main);
+      word-break: break-all;
+    }
+
+    /* Metrics Grid (Right) */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+
+    .metric-card {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .metric-title {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+    }
+
+    .metric-value {
+      font-size: 1.35rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      color: var(--accent-cyan);
+    }
+
+    .metric-value.emerald { color: var(--accent-emerald); }
+    .metric-value.amber { color: var(--accent-amber); }
+    .metric-value.rose { color: var(--accent-rose); }
+
+    /* Telemetry Generator Controls */
+    .auto-stream-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      padding: 0.6rem 0.75rem;
+      border-radius: 6px;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 22px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--border-highlight);
+      transition: .2s;
+      border-radius: 22px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .2s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--accent-cyan);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header>
+    <div class="brand">
+      <div class="brand-logo">VR</div>
+      <div class="brand-title">
+        <span>VoidRush</span>
+        <span class="badge-eiffel">SCOOP + C Epoll</span>
+      </div>
+    </div>
+
+    <div class="header-controls">
+      <div class="gateway-url-box">
+        <label for="gatewayUrl">Gateway</label>
+        <input type="text" id="gatewayUrl" value="http://localhost:4343">
+      </div>
+
+      <div class="status-pill" id="sseStatusPill">
+        <div class="status-dot offline" id="sseDot"></div>
+        <span id="sseLabel">SSE: Disconnected</span>
+      </div>
+
+      <div class="status-pill" id="wsStatusPill">
+        <div class="status-dot offline" id="wsDot"></div>
+        <span id="wsLabel">WS: Disconnected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main 3-Column Layout -->
+  <main>
+    
+    <!-- LEFT PANEL: Telemetry Producer & Stream Controls -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="panel-title-icon">⚡</span>
+          <span>Telemetry Producer</span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="roomIdInput">Active Room</label>
+        <input type="number" id="roomIdInput" value="42">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="sensorSelect">Sensor Metric</label>
+        <select id="sensorSelect">
+          <option value="turbine_rpm">Turbine Speed (RPM)</option>
+          <option value="coolant_temp">Coolant Temp (°C)</option>
+          <option value="fuel_pressure">Fuel Pressure (PSI)</option>
+          <option value="vibration_hz">Vibration Freq (Hz)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="sensorValue">Metric Value</label>
+        <input type="number" id="sensorValue" value="7250" step="0.1">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="protocolSelect">Ingest Protocol</label>
+        <select id="protocolSelect">
+          <option value="http">HTTP/1.1 Keep-Alive POST</option>
+          <option value="ws">WebSocket Binary/Text Frame</option>
+        </select>
+      </div>
+
+      <button class="btn btn-primary" id="btnTransmit">
+        <span>Transmit Metric Frame</span>
+      </button>
+
+      <div class="auto-stream-bar">
+        <div>
+          <div style="font-size: 0.8rem; font-weight: 600;">High-Rate Stream</div>
+          <div style="font-size: 0.7rem; color: var(--text-dim);">5 updates / sec</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autoStreamToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <hr style="border: 0; border-top: 1px solid var(--border-subtle); margin: 0.5rem 0;">
+
+      <!-- CHAOS INJECTION CONTROLS -->
+      <div class="panel-header" style="border: none; padding-bottom: 0;">
+        <div class="panel-title" style="color: var(--accent-rose);">
+          <span>💥</span>
+          <span>OTP Chaos Proving Ground</span>
+        </div>
+      </div>
+
+      <button class="btn btn-warning" id="btnChaosConn">
+        <span>Trigger Connection Fault</span>
+      </button>
+
+      <button class="btn btn-danger" id="btnChaosWorker">
+        <span>Crash Supervised Worker #0</span>
+      </button>
+
+      <button class="btn btn-secondary" id="btnChaosBroker">
+        <span>Crash Pub/Sub Broker</span>
+      </button>
+    </div>
+
+    <!-- CENTER PANEL: Real-time Live Event Stream -->
+    <div class="panel feed-container">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="panel-title-icon">📡</span>
+          <span>Spectator Event Feed (WHATWG SSE + RFC 6455)</span>
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button class="btn btn-secondary" id="btnToggleConnect" style="padding: 0.35rem 0.65rem; font-size: 0.75rem;">
+            Reconnect Streams
+          </button>
+          <button class="btn btn-secondary" id="btnClearFeed" style="padding: 0.35rem 0.65rem; font-size: 0.75rem;">
+            Clear Feed
+          </button>
+        </div>
+      </div>
+
+      <div class="feed-list" id="feedList">
+        <div class="event-card" style="border-left-color: var(--text-dim);">
+          <div class="event-header">
+            <span>SYSTEM INIT</span>
+            <span>00:00:00</span>
+          </div>
+          <div class="event-payload">Ready to stream real-time events. Initializing SSE and WebSocket listeners...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL: Live Atomic Prometheus Metrics -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="panel-title-icon">📊</span>
+          <span>Reactor & Supervisor Metrics</span>
+        </div>
+        <span style="font-size: 0.7rem; color: var(--accent-emerald);" id="metricsPollBadge">● 1s Poll</span>
+      </div>
+
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <span class="metric-title">Active Conns</span>
+          <span class="metric-value" id="m_active_conns">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">Accepts Total</span>
+          <span class="metric-value" id="m_accepts_total">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">SSE Out Total</span>
+          <span class="metric-value emerald" id="m_sse_out">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">WS Frames Out</span>
+          <span class="metric-value emerald" id="m_ws_out">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">Isolated Faults</span>
+          <span class="metric-value amber" id="m_isolated_faults">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">OTP Restarts</span>
+          <span class="metric-value rose" id="m_restarts_total">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">Epoll Events</span>
+          <span class="metric-value" id="m_events_total">0</span>
+        </div>
+
+        <div class="metric-card">
+          <span class="metric-title">Stale Events</span>
+          <span class="metric-value" id="m_stale_events">0</span>
+        </div>
+      </div>
+
+      <div style="font-size: 0.75rem; color: var(--text-dim); line-height: 1.4; margin-top: 0.5rem; background: var(--bg-surface-elevated); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border-subtle);">
+        <strong style="color: var(--text-muted);">OTP Invariants:</strong><br>
+        • Isolated Faults: Handled by worker <code>rescue</code>; 0 dropped peers.<br>
+        • OTP Restarts: Worker shard hot-swapped; orphaned FDs purged by native kernel.
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // State
+    let sseSource = null;
+    let wsSocket = null;
+    let autoStreamInterval = null;
+    let lastEventId = 0;
+
+    // DOM Elements
+    const gatewayUrlInput = document.getElementById('gatewayUrl');
+    const roomIdInput = document.getElementById('roomIdInput');
+    const sensorSelect = document.getElementById('sensorSelect');
+    const sensorValue = document.getElementById('sensorValue');
+    const protocolSelect = document.getElementById('protocolSelect');
+    const btnTransmit = document.getElementById('btnTransmit');
+    const autoStreamToggle = document.getElementById('autoStreamToggle');
+    const feedList = document.getElementById('feedList');
+    const btnClearFeed = document.getElementById('btnClearFeed');
+    const btnToggleConnect = document.getElementById('btnToggleConnect');
+
+    // Status Dots
+    const sseDot = document.getElementById('sseDot');
+    const sseLabel = document.getElementById('sseLabel');
+    const wsDot = document.getElementById('wsDot');
+    const wsLabel = document.getElementById('wsLabel');
+
+    // Chaos Buttons
+    const btnChaosConn = document.getElementById('btnChaosConn');
+    const btnChaosWorker = document.getElementById('btnChaosWorker');
+    const btnChaosBroker = document.getElementById('btnChaosBroker');
+
+    // Metrics DOM
+    const mActiveConns = document.getElementById('m_active_conns');
+    const mAcceptsTotal = document.getElementById('m_accepts_total');
+    const mSseOut = document.getElementById('m_sse_out');
+    const mWsOut = document.getElementById('m_ws_out');
+    const mIsolatedFaults = document.getElementById('m_isolated_faults');
+    const mRestartsTotal = document.getElementById('m_restarts_total');
+    const mEventsTotal = document.getElementById('m_events_total');
+    const mStaleEvents = document.getElementById('m_stale_events');
+
+    function getBaseUrl() {
+      let url = gatewayUrlInput.value.trim();
+      if (!url.startsWith('http')) {
+        url = 'http://' + url;
+      }
+      return url.replace(/\/$/, '');
+    }
+
+    function getWsUrl() {
+      return getBaseUrl().replace(/^http/, 'ws') + '/ws';
+    }
+
+    // Append event card to feed
+    function appendEventCard(protocol, text, isFault = false) {
+      const card = document.createElement('div');
+      card.className = `event-card ${protocol.toLowerCase()}-event ${isFault ? 'fault-event' : ''}`;
+      
+      const timeStr = new Date().toTimeString().split(' ')[0];
+      card.innerHTML = `
+        <div class="event-header">
+          <span class="event-type-badge">${protocol}</span>
+          <span>${timeStr}</span>
+        </div>
+        <div class="event-payload">${escapeHtml(text)}</div>
+      `;
+      feedList.prepend(card);
+
+      // Cap at 100 entries
+      if (feedList.children.length > 100) {
+        feedList.removeChild(feedList.lastChild);
+      }
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/[&<>'"]/g, 
+        tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
+    }
+
+    // Connect SSE
+    function connectSSE() {
+      if (sseSource) {
+        sseSource.close();
+      }
+
+      const room = roomIdInput.value.trim() || '42';
+      const sseUrl = `${getBaseUrl()}/events?room=${room}`;
+
+      sseDot.className = 'status-dot connecting';
+      sseLabel.textContent = 'SSE: Connecting...';
+
+      try {
+        sseSource = new EventSource(sseUrl);
+
+        sseSource.onopen = () => {
+          sseDot.className = 'status-dot active';
+          sseLabel.textContent = `SSE: Room ${room}`;
+          appendEventCard('SSE', `Stream connected to Room ${room} with retry directive.`);
+        };
+
+        sseSource.onmessage = (event) => {
+          if (event.lastEventId) {
+            lastEventId = event.lastEventId;
+          }
+          appendEventCard('SSE', event.data);
+        };
+
+        sseSource.onerror = () => {
+          sseDot.className = 'status-dot offline';
+          sseLabel.textContent = 'SSE: Reconnecting...';
+        };
+      } catch (err) {
+        sseDot.className = 'status-dot offline';
+        sseLabel.textContent = 'SSE: Error';
+      }
+    }
+
+    let wsReconnectTimeout = null;
+    let wsReconnectAttempts = 0;
+    const WS_MAX_RECONNECT_DELAY = 5000;
+
+    function scheduleWsReconnect() {
+      if (wsReconnectTimeout) return;
+      const delay = Math.min(1000 * Math.pow(1.5, wsReconnectAttempts), WS_MAX_RECONNECT_DELAY);
+      wsReconnectAttempts++;
+      wsDot.className = 'status-dot connecting';
+      wsLabel.textContent = `WS: Retry in ${(delay / 1000).toFixed(1)}s`;
+      
+      wsReconnectTimeout = setTimeout(() => {
+        wsReconnectTimeout = null;
+        connectWS();
+      }, delay);
+    }
+
+    // Connect WebSocket with Automatic Reconnection Loop
+    function connectWS() {
+      if (wsReconnectTimeout) {
+        clearTimeout(wsReconnectTimeout);
+        wsReconnectTimeout = null;
+      }
+      if (wsSocket) {
+        wsSocket.onclose = null;
+        wsSocket.onerror = null;
+        try { wsSocket.close(); } catch(e) {}
+      }
+
+      const wsUrl = getWsUrl();
+      wsDot.className = 'status-dot connecting';
+      wsLabel.textContent = 'WS: Connecting...';
+
+      try {
+        wsSocket = new WebSocket(wsUrl);
+
+        wsSocket.onopen = () => {
+          wsReconnectAttempts = 0;
+          wsDot.className = 'status-dot active';
+          wsLabel.textContent = 'WS: Connected';
+          appendEventCard('WS', 'RFC 6455 channel upgrade established.');
+        };
+
+        wsSocket.onmessage = (evt) => {
+          appendEventCard('WS', evt.data);
+        };
+
+        wsSocket.onclose = (event) => {
+          wsDot.className = 'status-dot offline';
+          appendEventCard('WS', `Connection closed (code ${event.code || 1006}). Scheduling auto-reconnect...`, true);
+          scheduleWsReconnect();
+        };
+
+        wsSocket.onerror = () => {
+          wsDot.className = 'status-dot offline';
+        };
+      } catch (err) {
+        wsDot.className = 'status-dot offline';
+        scheduleWsReconnect();
+      }
+    }
+
+    // Transmit Single Frame
+    async function transmitFrame() {
+      const room = parseInt(roomIdInput.value.trim() || '42');
+      const metric = sensorSelect.value;
+      const value = parseFloat(sensorValue.value);
+      const proto = protocolSelect.value;
+
+      const payload = JSON.stringify({
+        room: room,
+        sensor: metric,
+        val: value,
+        ts: Date.now()
+      });
+
+      if (proto === 'http') {
+        try {
+          const resp = await fetch(`${getBaseUrl()}/events`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload
+          });
+          if (resp.status === 202) {
+            // Success
+          }
+        } catch (e) {
+          appendEventCard('HTTP', `Transmit failed: ${e.message}`, true);
+        }
+      } else {
+        if (wsSocket && wsSocket.readyState === WebSocket.OPEN) {
+          wsSocket.send(`PUB ${room} ${payload}`);
+        } else {
+          appendEventCard('WS', 'Cannot transmit: WebSocket not connected.', true);
+        }
+      }
+    }
+
+    // Auto-stream toggle
+    autoStreamToggle.addEventListener('change', (e) => {
+      if (e.target.checked) {
+        autoStreamInterval = setInterval(() => {
+          // slight random jitter
+          const base = parseFloat(sensorValue.value);
+          sensorValue.value = (base + (Math.random() * 2 - 1)).toFixed(1);
+          transmitFrame();
+        }, 200);
+      } else {
+        if (autoStreamInterval) {
+          clearInterval(autoStreamInterval);
+          autoStreamInterval = null;
+        }
+      }
+    });
+
+    // Chaos actions
+    btnChaosConn.addEventListener('click', async () => {
+      try {
+        appendEventCard('CHAOS', 'Triggering deliberate connection fault (POST /debug/fault?type=conn)...', true);
+        await fetch(`${getBaseUrl()}/debug/fault?type=conn`, { method: 'POST' });
+      } catch (e) {
+        appendEventCard('CHAOS', 'Connection fault caught and isolated by worker rescue.', true);
+      }
+    });
+
+    btnChaosWorker.addEventListener('click', async () => {
+      try {
+        appendEventCard('CHAOS', 'Crashing Supervised Worker #0 (POST /debug/fault?type=worker)...', true);
+        const resp = await fetch(`${getBaseUrl()}/debug/fault?type=worker`, { method: 'POST' });
+        const txt = await resp.text();
+        appendEventCard('CHAOS', txt || 'Worker fault reported. Supervisor hot-swapping shard.', true);
+      } catch (e) {
+        appendEventCard('CHAOS', `Request notice: ${e.message}`, true);
+      }
+    });
+
+    btnChaosBroker.addEventListener('click', async () => {
+      try {
+        appendEventCard('CHAOS', 'Crashing Pub/Sub Broker (POST /debug/fault?type=broker)...', true);
+        const resp = await fetch(`${getBaseUrl()}/debug/fault?type=broker`, { method: 'POST' });
+        const txt = await resp.text();
+        appendEventCard('CHAOS', txt || 'Broker fault reported. Supervisor hot-swapping broker in-place.', true);
+      } catch (e) {
+        appendEventCard('CHAOS', `Request notice: ${e.message}`, true);
+      }
+    });
+
+    // Poll Prometheus Metrics
+    async function pollMetrics() {
+      try {
+        const resp = await fetch(`${getBaseUrl()}/metrics`);
+        if (!resp.ok) return;
+        const text = await resp.text();
+
+        const getMetric = (name) => {
+          const m = text.match(new RegExp(`^${name}\\s+(\\d+)`, 'm'));
+          return m ? m[1] : '0';
+        };
+
+        mActiveConns.textContent = getMetric('vr_connections_active');
+        mAcceptsTotal.textContent = getMetric('vr_accepts_total');
+        mSseOut.textContent = getMetric('vr_sse_events_out_total');
+        mWsOut.textContent = getMetric('vr_ws_frames_out_total');
+        mIsolatedFaults.textContent = getMetric('vr_supervisor_isolated_faults_total');
+        mRestartsTotal.textContent = getMetric('vr_supervisor_restarts_total');
+        mEventsTotal.textContent = getMetric('vr_events_total');
+        mStaleEvents.textContent = getMetric('vr_stale_events_total');
+      } catch (e) {
+        // quiet ignore during offline or restarts
+      }
+    }
+
+    // Event Listeners
+    btnTransmit.addEventListener('click', transmitFrame);
+    btnClearFeed.addEventListener('click', () => { feedList.innerHTML = ''; });
+    btnToggleConnect.addEventListener('click', () => {
+      wsReconnectAttempts = 0;
+      connectSSE();
+      connectWS();
+    });
+
+    // Initialize default connection
+    window.addEventListener('load', () => {
+      // If served directly from server, adapt gateway URL automatically
+      if (window.location.protocol.startsWith('http')) {
+        gatewayUrlInput.value = `${window.location.protocol}//${window.location.host}`;
+      }
+      connectSSE();
+      connectWS();
+      setInterval(pollMetrics, 1000);
+      pollMetrics();
+    });
+  </script>
+</body>
+</html>

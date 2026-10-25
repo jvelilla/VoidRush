@@ -108,6 +108,54 @@ feature -- Status Report
 
 feature -- Output
 
+	to_prometheus_format: STRING_8
+			-- Prometheus text exposition format.
+		do
+			create Result.make (1024)
+			Result.append ("# HELP vr_connections_active Currently active connections%N")
+			Result.append ("# TYPE vr_connections_active gauge%N")
+			Result.append ("vr_connections_active " + active_connections.out + "%N")
+			Result.append ("# HELP vr_accepts_total Cumulative accepted connections%N")
+			Result.append ("# TYPE vr_accepts_total counter%N")
+			Result.append ("vr_accepts_total " + accepts_total.out + "%N")
+			Result.append ("# HELP vr_events_total Epoll readiness events processed%N")
+			Result.append ("# TYPE vr_events_total counter%N")
+			Result.append ("vr_events_total " + events_total.out + "%N")
+			Result.append ("# HELP vr_stale_events_total Events dropped due to generation token mismatch%N")
+			Result.append ("# TYPE vr_stale_events_total counter%N")
+			Result.append ("vr_stale_events_total " + stale_events.out + "%N")
+			Result.append ("# HELP vr_bytes_in_total Total bytes received%N")
+			Result.append ("# TYPE vr_bytes_in_total counter%N")
+			Result.append ("vr_bytes_in_total " + bytes_in_total.out + "%N")
+			Result.append ("# HELP vr_bytes_out_total Total bytes sent%N")
+			Result.append ("# TYPE vr_bytes_out_total counter%N")
+			Result.append ("vr_bytes_out_total " + bytes_out_total.out + "%N")
+			Result.append ("# HELP vr_ws_upgrades_total Total successful WebSocket upgrades%N")
+			Result.append ("# TYPE vr_ws_upgrades_total counter%N")
+			Result.append ("vr_ws_upgrades_total " + ws_upgrades_total.out + "%N")
+			Result.append ("# HELP vr_ws_frames_in_total Total inbound WebSocket frames%N")
+			Result.append ("# TYPE vr_ws_frames_in_total counter%N")
+			Result.append ("vr_ws_frames_in_total " + ws_frames_in_total.out + "%N")
+			Result.append ("# HELP vr_ws_frames_out_total Total outbound WebSocket frames%N")
+			Result.append ("# TYPE vr_ws_frames_out_total counter%N")
+			Result.append ("vr_ws_frames_out_total " + ws_frames_out_total.out + "%N")
+			Result.append ("# HELP vr_sse_streams_total Total SSE streams created%N")
+			Result.append ("# TYPE vr_sse_streams_total counter%N")
+			Result.append ("vr_sse_streams_total " + sse_streams_total.out + "%N")
+			Result.append ("# HELP vr_sse_events_out_total Total SSE events sent%N")
+			Result.append ("# TYPE vr_sse_events_out_total counter%N")
+			Result.append ("vr_sse_events_out_total " + sse_events_out_total.out + "%N")
+			Result.append ("# HELP vr_sse_heartbeats_total Total SSE heartbeats sent%N")
+			Result.append ("# TYPE vr_sse_heartbeats_total counter%N")
+			Result.append ("vr_sse_heartbeats_total " + sse_heartbeats_total.out + "%N")
+			Result.append ("# HELP vr_supervisor_restarts_total Cumulative child supervisor restarts%N")
+			Result.append ("# TYPE vr_supervisor_restarts_total counter%N")
+			Result.append ("vr_supervisor_restarts_total " + supervisor_restarts_total.out + "%N")
+			Result.append ("# HELP vr_supervisor_isolated_faults_total Rescued single-connection faults%N")
+			Result.append ("# TYPE vr_supervisor_isolated_faults_total counter%N")
+			Result.append ("vr_supervisor_isolated_faults_total " + supervisor_isolated_faults_total.out + "%N")
+		end
+
 	out: STRING
 			-- Human-readable metrics snapshot.
 		do

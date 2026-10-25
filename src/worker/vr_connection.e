@@ -781,16 +781,106 @@ feature {NONE} -- Inbound Protocol Pipeline
 	handle_http_request (a_now_ms: NATURAL_64)
 			-- Dispatch parsed HTTP request to fast path or standard response.
 		do
-			if http_parser.method = Method_get and then
+			if http_parser.method = Method_options then
+				append_options_response
+			elseif http_parser.method = Method_get and then
 			   http_parser.path_slice.same_as_string (in_buf, "/healthz") then
 				append_static_healthz_response
 			elseif http_parser.method = Method_get and then
+			       http_parser.path_slice.same_as_string (in_buf, "/metrics") then
+				append_metrics_response
+			elseif (http_parser.method = Method_post or http_parser.method = Method_get) and then
+			       http_parser.path_slice.same_as_string (in_buf, "/debug/fault") then
+				handle_debug_fault
+			elseif http_parser.method = Method_get and then
 			       (http_parser.path_slice.same_as_string (in_buf, "/") or
-			        http_parser.path_slice.same_as_string (in_buf, "/echo")) then
+			        http_parser.path_slice.same_as_string (in_buf, "/index.html") or
+			        http_parser.path_slice.same_as_string (in_buf, "/dashboard")) then
+				append_dashboard_html_response
+			elseif http_parser.method = Method_get and then
+			       http_parser.path_slice.same_as_string (in_buf, "/echo") then
 				append_standard_response ("VoidRush HTTP/1.1 Engine OK")
 			else
 				append_error_response (404, "Not Found")
 			end
+		end
+
+	append_options_response
+			-- Immediate 200 OK response for CORS preflight.
+		local
+			resp: STRING_8
+		do
+			resp := "HTTP/1.1 200 OK%R%NAccess-Control-Allow-Origin: *%R%NAccess-Control-Allow-Methods: GET, POST, OPTIONS%R%NAccess-Control-Allow-Headers: Content-Type, Last-Event-ID, Accept%R%NContent-Length: 0%R%NConnection: keep-alive%R%N%R%N"
+			append_outbound_string (resp)
+		end
+
+	append_dashboard_html_response
+			-- Serve Web Dashboard HTML client.
+		local
+			f: PLAIN_TEXT_FILE
+			resp, html: STRING_8
+		do
+			create f.make_with_name ("example/web/index.html")
+			if not f.exists then
+				create f.make_with_name ("/opt/eiffel/src/example/web/index.html")
+			end
+			if f.exists and then f.is_readable then
+				f.open_read
+				f.read_stream (f.count)
+				html := f.last_string
+				f.close
+			else
+				html := "<!DOCTYPE html><html><body><h1>VoidRush Telemetry Gateway</h1><p>Visit /events or /metrics.</p></body></html>"
+			end
+			create resp.make (256 + html.count)
+			resp.append ("HTTP/1.1 200 OK%R%NContent-Type: text/html; charset=utf-8%R%NAccess-Control-Allow-Origin: *%R%NContent-Length: ")
+			resp.append (html.count.out)
+			if http_parser.is_keep_alive then
+				resp.append ("%R%NConnection: keep-alive%R%N%R%N")
+			else
+				resp.append ("%R%NConnection: close%R%N%R%N")
+			end
+			resp.append (html)
+			append_outbound_string (resp)
+		end
+
+	handle_debug_fault
+			-- Execute controlled fault injection based on query parameters.
+		local
+			w_id: INTEGER
+		do
+			if http_parser.query_slice.has_substring_case_insensitive (in_buf, "worker") then
+				w_id := fd \\ 4
+				if reactor_handle /= default_pointer then
+					{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, w_id)
+					{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+				end
+				append_standard_response ("Fault Injected: Worker Crashed%N")
+			elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "broker") then
+				if reactor_handle /= default_pointer then
+					{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (reactor_handle)
+					{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+				end
+				append_standard_response ("Fault Injected: Broker Crashed%N")
+			else
+				-- Connection-level fault simulation: triggers rescue on current_fd
+				check deliberate_connection_fault: False end
+			end
+		end
+
+	append_metrics_response
+			-- Expose Prometheus metrics from native reactor.
+		local
+			m: VR_METRICS
+			body: STRING_8
+		do
+			if reactor_handle /= default_pointer then
+				create m.make_from_pointer (reactor_handle)
+				body := m.to_prometheus_format
+			else
+				body := "# No active reactor%N"
+			end
+			append_standard_response (body)
 		end
 
 feature -- Response Builders (Zero/Low Allocation)
@@ -801,9 +891,9 @@ feature -- Response Builders (Zero/Low Allocation)
 			resp: STRING_8
 		do
 			if http_parser.is_keep_alive then
-				resp := "HTTP/1.1 200 OK%R%NContent-Type: text/plain%R%NContent-Length: 2%R%NConnection: keep-alive%R%N%R%NOK"
+				resp := "HTTP/1.1 200 OK%R%NContent-Type: text/plain%R%NAccess-Control-Allow-Origin: *%R%NContent-Length: 2%R%NConnection: keep-alive%R%N%R%NOK"
 			else
-				resp := "HTTP/1.1 200 OK%R%NContent-Type: text/plain%R%NContent-Length: 2%R%NConnection: close%R%N%R%NOK"
+				resp := "HTTP/1.1 200 OK%R%NContent-Type: text/plain%R%NAccess-Control-Allow-Origin: *%R%NContent-Length: 2%R%NConnection: close%R%N%R%NOK"
 			end
 			append_outbound_string (resp)
 		end
@@ -815,8 +905,8 @@ feature -- Response Builders (Zero/Low Allocation)
 		local
 			resp: STRING_8
 		do
-			create resp.make (128 + body.count)
-			resp.append ("HTTP/1.1 200 OK%R%NContent-Type: text/plain%R%NContent-Length: ")
+			create resp.make (160 + body.count)
+			resp.append ("HTTP/1.1 200 OK%R%NContent-Type: text/plain%R%NAccess-Control-Allow-Origin: *%R%NContent-Length: ")
 			resp.append (body.count.out)
 			if http_parser.is_keep_alive then
 				resp.append ("%R%NConnection: keep-alive%R%N%R%N")

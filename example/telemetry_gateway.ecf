@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<system xmlns="http://www.eiffel.com/developers/xml/configuration-1-23-0"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.eiffel.com/developers/xml/configuration-1-23-0 http://www.eiffel.com/developers/xml/configuration-1-23-0.xsd"
+        name="telemetry_gateway"
+        uuid="C7D8E9F0-1234-5678-9ABC-DEF012345678">
+	<target name="telemetry_gateway">
+		<root class="VR_TELEMETRY_APP" feature="make"/>
+		<option warning="warning">
+			<assertions precondition="true" postcondition="true" check="true" invariant="true" loop="true"/>
+		</option>
+		<setting name="console_application" value="true"/>
+		<setting name="total_order_on_reals" value="true"/>
+		<setting name="dead_code_removal" value="feature"/>
+		<capability>
+			<concurrency support="scoop"/>
+			<void_safety support="all"/>
+		</capability>
+		<external_include location="$(ISE_PROJECT)/native"/>
+		<external_object location="$(ISE_PROJECT)/native/libvr_reactor_bridge.a"/>
+		<library name="base" location="$ISE_LIBRARY/library/base/base.ecf"/>
+		<cluster name="voidrush_core" location="../src" recursive="true"/>
+		<cluster name="telemetry_example" location="./src" recursive="true"/>
+	</target>
+</system>
