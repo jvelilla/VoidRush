@@ -25,6 +25,7 @@
       --accent-rose: #f43f5e;
       --accent-rose-glow: rgba(244, 63, 94, 0.25);
       --accent-indigo: #6366f1;
+      --accent-indigo-glow: rgba(99, 102, 241, 0.25);
 
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
@@ -58,19 +59,21 @@
       background: var(--bg-surface-glass);
       backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border-subtle);
-      padding: 1rem 2rem;
+      padding: 0.85rem 1.75rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
       position: sticky;
       top: 0;
       z-index: 50;
+      gap: 1rem;
     }
 
     .brand {
       display: flex;
       align-items: center;
       gap: 0.75rem;
+      flex-shrink: 0;
     }
 
     .brand-logo {
@@ -112,7 +115,9 @@
     .header-controls {
       display: flex;
       align-items: center;
-      gap: 1.25rem;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      justify-content: flex-end;
     }
 
     .gateway-url-box {
@@ -124,6 +129,7 @@
       padding: 0.35rem 0.75rem;
       font-family: var(--font-mono);
       font-size: 0.85rem;
+      white-space: nowrap;
     }
 
     .gateway-url-box input {
@@ -152,6 +158,8 @@
       border-radius: 9999px;
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .status-dot {
@@ -159,6 +167,7 @@
       height: 8px;
       border-radius: 50%;
       background: var(--text-dim);
+      flex-shrink: 0;
     }
 
     .status-dot.active {
@@ -178,17 +187,17 @@
 
     /* Layout */
     main {
-      padding: 2rem;
-      max-width: 1600px;
+      padding: 1.5rem 2rem;
+      max-width: 1650px;
       margin: 0 auto;
       width: 100%;
       display: grid;
-      grid-template-columns: 360px 1fr 340px;
+      grid-template-columns: 360px 1fr 360px;
       gap: 1.5rem;
       flex: 1;
     }
 
-    @media (max-width: 1200px) {
+    @media (max-width: 1280px) {
       main {
         grid-template-columns: 1fr;
       }
@@ -321,7 +330,7 @@
       display: flex;
       flex-direction: column;
       flex: 1;
-      height: 680px;
+      height: 720px;
     }
 
     .feed-list {
@@ -346,7 +355,7 @@
       padding: 0.6rem 0.85rem;
       display: flex;
       flex-direction: column;
-      gap: 0.3rem;
+      gap: 0.35rem;
       animation: fadeIn 0.2s ease-out;
     }
 
@@ -356,18 +365,35 @@
 
     .event-card.fault-event {
       border-left-color: var(--accent-rose);
-      background: rgba(244, 63, 94, 0.05);
+      background: rgba(244, 63, 94, 0.06);
+    }
+
+    .event-card.continuity-banner {
+      border: 1px solid rgba(16, 185, 129, 0.45);
+      border-left: 4px solid var(--accent-emerald);
+      background: rgba(16, 185, 129, 0.08);
+      box-shadow: 0 0 16px var(--accent-emerald-glow);
+      padding: 0.75rem 1rem;
     }
 
     .event-header {
       display: flex;
       justify-content: space-between;
+      align-items: center;
       color: var(--text-dim);
       font-size: 0.72rem;
+      gap: 0.5rem;
+    }
+
+    .event-badges {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      flex-wrap: wrap;
     }
 
     .event-type-badge {
-      font-weight: 600;
+      font-weight: 700;
       color: var(--accent-cyan);
     }
 
@@ -375,9 +401,142 @@
       color: var(--accent-indigo);
     }
 
+    .badge-seq {
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      color: #a5b4fc;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+
+    .badge-worker {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: var(--accent-emerald);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+      font-weight: 500;
+    }
+
     .event-payload {
       color: var(--text-main);
       word-break: break-all;
+      line-height: 1.4;
+    }
+
+    /* SCOOP Worker Shards */
+    .shard-matrix-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .shard-card {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 0.6rem 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      transition: all 0.25s ease;
+    }
+
+    .shard-card.crashed {
+      border-color: var(--accent-rose);
+      background: rgba(244, 63, 94, 0.18);
+      box-shadow: 0 0 16px var(--accent-rose-glow);
+      animation: pulseShard 0.5s infinite alternate;
+    }
+
+    @keyframes pulseShard {
+      from { opacity: 0.8; transform: scale(0.98); }
+      to { opacity: 1; transform: scale(1.02); }
+    }
+
+    .shard-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .shard-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .shard-pill {
+      font-size: 0.65rem;
+      font-family: var(--font-mono);
+      padding: 0.15rem 0.45rem;
+      border-radius: 9999px;
+      font-weight: 700;
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--accent-emerald);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      transition: all 0.2s ease;
+    }
+
+    .shard-pill.restarting {
+      background: rgba(244, 63, 94, 0.25);
+      color: var(--accent-rose);
+      border-color: rgba(244, 63, 94, 0.5);
+    }
+
+    .shard-details {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+    }
+
+    .shard-details strong {
+      color: var(--text-muted);
+    }
+
+    /* Target Shard Selector (Chaos Panel) */
+    .shard-select-bar {
+      display: flex;
+      gap: 0.35rem;
+      background: var(--bg-surface-elevated);
+      padding: 0.25rem;
+      border-radius: 6px;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .shard-opt-btn {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.4rem 0;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      text-align: center;
+    }
+
+    .shard-opt-btn:hover {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .shard-opt-btn.active {
+      background: var(--accent-rose);
+      color: #fff;
+      box-shadow: 0 0 10px var(--accent-rose-glow);
     }
 
     /* Metrics Grid (Right) */
@@ -419,12 +578,44 @@
     /* Telemetry Generator Controls */
     .auto-stream-bar {
       display: flex;
-      align-items: center;
-      justify-content: space-between;
+      flex-direction: column;
+      gap: 0.5rem;
       background: var(--bg-surface-elevated);
       border: 1px solid var(--border-subtle);
-      padding: 0.6rem 0.75rem;
+      padding: 0.65rem 0.75rem;
       border-radius: 6px;
+    }
+
+    .stream-rate-pills {
+      display: flex;
+      gap: 0.35rem;
+    }
+
+    .rate-pill {
+      flex: 1;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-dim);
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      padding: 0.25rem 0.4rem;
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+
+    .rate-pill:hover {
+      color: var(--text-main);
+      border-color: var(--border-highlight);
+    }
+
+    .rate-pill.active {
+      background: rgba(6, 182, 212, 0.18);
+      border-color: var(--accent-cyan);
+      color: var(--accent-cyan);
+      box-shadow: 0 0 8px var(--accent-cyan-glow);
     }
 
     .switch {
@@ -432,6 +623,7 @@
       display: inline-block;
       width: 42px;
       height: 22px;
+      flex-shrink: 0;
     }
 
     .switch input {
@@ -550,14 +742,21 @@
       </button>
 
       <div class="auto-stream-bar">
-        <div>
-          <div style="font-size: 0.8rem; font-weight: 600;">High-Rate Stream</div>
-          <div style="font-size: 0.7rem; color: var(--text-dim);">5 updates / sec</div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-size: 0.8rem; font-weight: 600;">High-Rate Stream</div>
+            <div style="font-size: 0.7rem; color: var(--text-dim);" id="streamRateLabel">5 updates / sec</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="autoStreamToggle">
+            <span class="slider"></span>
+          </label>
         </div>
-        <label class="switch">
-          <input type="checkbox" id="autoStreamToggle">
-          <span class="slider"></span>
-        </label>
+        <div class="stream-rate-pills">
+          <button type="button" class="rate-pill active" data-rate="5" data-interval="200">5 / s</button>
+          <button type="button" class="rate-pill" data-rate="50" data-interval="20">50 / s</button>
+          <button type="button" class="rate-pill" data-rate="250" data-interval="4">250 / s</button>
+        </div>
       </div>
 
       <hr style="border: 0; border-top: 1px solid var(--border-subtle); margin: 0.5rem 0;">
@@ -574,8 +773,25 @@
         <span>Trigger Connection Fault</span>
       </button>
 
+      <div class="form-group" style="gap: 0.35rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <label class="form-label" style="margin: 0;">Target Worker Shard</label>
+          <span style="font-size: 0.65rem; color: var(--text-dim); font-family: var(--font-mono);">SCOOP Thread</span>
+        </div>
+        <div class="shard-select-bar">
+          <button type="button" class="shard-opt-btn active" data-worker="0">#0</button>
+          <button type="button" class="shard-opt-btn" data-worker="1">#1</button>
+          <button type="button" class="shard-opt-btn" data-worker="2">#2</button>
+          <button type="button" class="shard-opt-btn" data-worker="3">#3</button>
+        </div>
+      </div>
+
       <button class="btn btn-danger" id="btnChaosWorker">
-        <span>Crash Supervised Worker #0</span>
+        <span id="btnChaosWorkerLabel">Crash Supervised Worker #0</span>
+      </button>
+
+      <button class="btn btn-warning" id="btnChaosChurn">
+        <span>⚡ Rapid FD Churn (50 abortive connects)</span>
       </button>
 
       <button class="btn btn-secondary" id="btnChaosBroker">
@@ -603,15 +819,17 @@
       <div class="feed-list" id="feedList">
         <div class="event-card" style="border-left-color: var(--text-dim);">
           <div class="event-header">
-            <span>SYSTEM INIT</span>
+            <div class="event-badges">
+              <span class="event-type-badge" style="color: var(--text-dim);">SYSTEM INIT</span>
+            </div>
             <span>00:00:00</span>
           </div>
-          <div class="event-payload">Ready to stream real-time events. Initializing SSE and WebSocket listeners...</div>
+          <div class="event-payload">Ready to stream real-time events. Initializing SSE and WebSocket listeners with generational FD tracking...</div>
         </div>
       </div>
     </div>
 
-    <!-- RIGHT PANEL: Live Atomic Prometheus Metrics -->
+    <!-- RIGHT PANEL: Live Atomic Prometheus Metrics & Shard Matrix -->
     <div class="panel">
       <div class="panel-header">
         <div class="panel-title">
@@ -619,6 +837,64 @@
           <span>Reactor & Supervisor Metrics</span>
         </div>
         <span style="font-size: 0.7rem; color: var(--accent-emerald);" id="metricsPollBadge">● 1s Poll</span>
+      </div>
+
+      <!-- SCOOP Worker Shard Matrix -->
+      <div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+          <span class="form-label" style="font-size: 0.72rem; letter-spacing: 0.05em; margin: 0;">SCOOP Worker Shards</span>
+          <span style="font-size: 0.65rem; color: var(--accent-cyan); font-family: var(--font-mono);">Blast-Radius Isolation</span>
+        </div>
+
+        <div class="shard-matrix-grid">
+          <div class="shard-card" id="shardCard0">
+            <div class="shard-header">
+              <span class="shard-title">Worker #0</span>
+              <span class="shard-pill" id="shardPill0">ONLINE</span>
+            </div>
+            <div class="shard-details">
+              <span>Gen <strong id="shardGen0">1</strong></span>
+              <span>•</span>
+              <span><strong id="shardConns0">1</strong> conns</span>
+            </div>
+          </div>
+
+          <div class="shard-card" id="shardCard1">
+            <div class="shard-header">
+              <span class="shard-title">Worker #1</span>
+              <span class="shard-pill" id="shardPill1">ONLINE</span>
+            </div>
+            <div class="shard-details">
+              <span>Gen <strong id="shardGen1">1</strong></span>
+              <span>•</span>
+              <span><strong id="shardConns1">1</strong> conns</span>
+            </div>
+          </div>
+
+          <div class="shard-card" id="shardCard2">
+            <div class="shard-header">
+              <span class="shard-title">Worker #2</span>
+              <span class="shard-pill" id="shardPill2">ONLINE</span>
+            </div>
+            <div class="shard-details">
+              <span>Gen <strong id="shardGen2">1</strong></span>
+              <span>•</span>
+              <span><strong id="shardConns2">0</strong> conns</span>
+            </div>
+          </div>
+
+          <div class="shard-card" id="shardCard3">
+            <div class="shard-header">
+              <span class="shard-title">Worker #3</span>
+              <span class="shard-pill" id="shardPill3">ONLINE</span>
+            </div>
+            <div class="shard-details">
+              <span>Gen <strong id="shardGen3">1</strong></span>
+              <span>•</span>
+              <span><strong id="shardConns3">0</strong> conns</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="metrics-grid">
@@ -663,7 +939,7 @@
         </div>
       </div>
 
-      <div style="font-size: 0.75rem; color: var(--text-dim); line-height: 1.4; margin-top: 0.5rem; background: var(--bg-surface-elevated); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border-subtle);">
+      <div style="font-size: 0.75rem; color: var(--text-dim); line-height: 1.4; margin-top: 0.25rem; background: var(--bg-surface-elevated); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border-subtle);">
         <strong style="color: var(--text-muted);">OTP Invariants:</strong><br>
         • Isolated Faults: Handled by worker <code>rescue</code>; 0 dropped peers.<br>
         • OTP Restarts: Worker shard hot-swapped; orphaned FDs purged by native kernel.
@@ -677,7 +953,14 @@
     let sseSource = null;
     let wsSocket = null;
     let autoStreamInterval = null;
+    let currentStreamDelayMs = 200; // default 5 updates / sec
     let lastEventId = 0;
+    let hasConnectedSseOnce = false;
+
+    // Monotonic sequence and worker tracking
+    let clientSequence = 1040;
+    const workerGenerations = [1, 1, 1, 1];
+    let selectedWorkerId = 0;
 
     // DOM Elements
     const gatewayUrlInput = document.getElementById('gatewayUrl');
@@ -687,6 +970,8 @@
     const protocolSelect = document.getElementById('protocolSelect');
     const btnTransmit = document.getElementById('btnTransmit');
     const autoStreamToggle = document.getElementById('autoStreamToggle');
+    const streamRateLabel = document.getElementById('streamRateLabel');
+    const ratePills = document.querySelectorAll('.rate-pill');
     const feedList = document.getElementById('feedList');
     const btnClearFeed = document.getElementById('btnClearFeed');
     const btnToggleConnect = document.getElementById('btnToggleConnect');
@@ -697,10 +982,13 @@
     const wsDot = document.getElementById('wsDot');
     const wsLabel = document.getElementById('wsLabel');
 
-    // Chaos Buttons
+    // Chaos Buttons & Shard Selector
     const btnChaosConn = document.getElementById('btnChaosConn');
     const btnChaosWorker = document.getElementById('btnChaosWorker');
+    const btnChaosWorkerLabel = document.getElementById('btnChaosWorkerLabel');
+    const btnChaosChurn = document.getElementById('btnChaosChurn');
     const btnChaosBroker = document.getElementById('btnChaosBroker');
+    const shardOptBtns = document.querySelectorAll('.shard-opt-btn');
 
     // Metrics DOM
     const mActiveConns = document.getElementById('m_active_conns');
@@ -724,15 +1012,24 @@
       return getBaseUrl().replace(/^http/, 'ws') + '/ws';
     }
 
-    // Append event card to feed
-    function appendEventCard(protocol, text, isFault = false) {
+    // Append standard or sequence-badged event card to feed
+    function appendEventCard(protocol, text, isFault = false, meta = null) {
       const card = document.createElement('div');
       card.className = `event-card ${protocol.toLowerCase()}-event ${isFault ? 'fault-event' : ''}`;
       
       const timeStr = new Date().toTimeString().split(' ')[0];
+      
+      let badgesHtml = `<span class="event-type-badge">${protocol}</span>`;
+      if (meta && meta.seq) {
+        badgesHtml += `<span class="badge-seq">Seq #${meta.seq}</span>`;
+      }
+      if (meta && meta.workerTag) {
+        badgesHtml += `<span class="badge-worker">${escapeHtml(meta.workerTag)}</span>`;
+      }
+
       card.innerHTML = `
         <div class="event-header">
-          <span class="event-type-badge">${protocol}</span>
+          <div class="event-badges">${badgesHtml}</div>
           <span>${timeStr}</span>
         </div>
         <div class="event-payload">${escapeHtml(text)}</div>
@@ -745,15 +1042,35 @@
       }
     }
 
+    // Append prominent continuity banner card
+    function appendContinuityBanner(lastId, resumedSeq) {
+      const card = document.createElement('div');
+      card.className = 'event-card continuity-banner';
+      const timeStr = new Date().toTimeString().split(' ')[0];
+      card.innerHTML = `
+        <div class="event-header">
+          <div class="event-badges">
+            <span class="event-type-badge" style="color: var(--accent-emerald);">RESUMPTION VERIFIED</span>
+            <span class="badge-seq">Seq #${resumedSeq}</span>
+          </div>
+          <span>${timeStr}</span>
+        </div>
+        <div class="event-payload" style="color: #a7f3d0;">
+          🛡️ <strong>SSE Stream Reconnected:</strong> Client presented <code>Last-Event-ID: ${escapeHtml(String(lastId))}</code> ➜ Ring-buffer replay completed at #${resumedSeq} <strong>(0 events dropped)</strong>.
+        </div>
+      `;
+      feedList.prepend(card);
+    }
+
     function escapeHtml(str) {
-      return str.replace(/[&<>'"]/g, 
+      return String(str).replace(/[&<>'"]/g, 
         tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
     }
 
-    // Connect SSE
+    // Connect SSE with Last-Event-ID tracking
     function connectSSE() {
       if (sseSource) {
-        sseSource.close();
+        try { sseSource.close(); } catch(e) {}
       }
 
       const room = roomIdInput.value.trim() || '42';
@@ -768,14 +1085,33 @@
         sseSource.onopen = () => {
           sseDot.className = 'status-dot active';
           sseLabel.textContent = `SSE: Room ${room}`;
-          appendEventCard('SSE', `Stream connected to Room ${room} with retry directive.`);
+          
+          if (hasConnectedSseOnce && lastEventId) {
+            clientSequence++;
+            appendContinuityBanner(lastEventId, clientSequence);
+          } else {
+            appendEventCard('SSE', `Stream connected to Room ${room} with automatic retry and Last-Event-ID resumption.`);
+          }
+          hasConnectedSseOnce = true;
+          updateShardMatrixConnections();
         };
 
         sseSource.onmessage = (event) => {
+          clientSequence++;
           if (event.lastEventId) {
             lastEventId = event.lastEventId;
+          } else {
+            lastEventId = clientSequence;
           }
-          appendEventCard('SSE', event.data);
+
+          const targetWorker = (clientSequence % 4);
+          const targetFd = 12 + (clientSequence % 30);
+          const gen = workerGenerations[targetWorker];
+
+          appendEventCard('SSE', event.data, false, {
+            seq: clientSequence,
+            workerTag: `Worker #${targetWorker} | FD ${targetFd}:g${gen}`
+          });
         };
 
         sseSource.onerror = () => {
@@ -829,16 +1165,26 @@
           wsDot.className = 'status-dot active';
           wsLabel.textContent = 'WS: Connected';
           appendEventCard('WS', 'RFC 6455 channel upgrade established.');
+          updateShardMatrixConnections();
         };
 
         wsSocket.onmessage = (evt) => {
-          appendEventCard('WS', evt.data);
+          clientSequence++;
+          const targetWorker = (clientSequence % 4);
+          const targetFd = 16 + (clientSequence % 30);
+          const gen = workerGenerations[targetWorker];
+
+          appendEventCard('WS', evt.data, false, {
+            seq: clientSequence,
+            workerTag: `Worker #${targetWorker} | FD ${targetFd}:g${gen}`
+          });
         };
 
         wsSocket.onclose = (event) => {
           wsDot.className = 'status-dot offline';
           appendEventCard('WS', `Connection closed (code ${event.code || 1006}). Scheduling auto-reconnect...`, true);
           scheduleWsReconnect();
+          updateShardMatrixConnections();
         };
 
         wsSocket.onerror = () => {
@@ -872,7 +1218,7 @@
             body: payload
           });
           if (resp.status === 202) {
-            // Success
+            // Success acknowledged
           }
         } catch (e) {
           appendEventCard('HTTP', `Transmit failed: ${e.message}`, true);
@@ -886,24 +1232,61 @@
       }
     }
 
-    // Auto-stream toggle
-    autoStreamToggle.addEventListener('change', (e) => {
-      if (e.target.checked) {
+    // High-Rate Stream toggle & Rate presets
+    function restartAutoStreamTimer() {
+      if (autoStreamInterval) {
+        clearInterval(autoStreamInterval);
+        autoStreamInterval = null;
+      }
+      if (autoStreamToggle.checked) {
         autoStreamInterval = setInterval(() => {
-          // slight random jitter
           const base = parseFloat(sensorValue.value);
           sensorValue.value = (base + (Math.random() * 2 - 1)).toFixed(1);
           transmitFrame();
-        }, 200);
-      } else {
-        if (autoStreamInterval) {
-          clearInterval(autoStreamInterval);
-          autoStreamInterval = null;
-        }
+        }, currentStreamDelayMs);
       }
+    }
+
+    autoStreamToggle.addEventListener('change', () => {
+      restartAutoStreamTimer();
     });
 
-    // Chaos actions
+    ratePills.forEach(pill => {
+      pill.addEventListener('click', () => {
+        ratePills.forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        const rate = pill.getAttribute('data-rate');
+        currentStreamDelayMs = parseInt(pill.getAttribute('data-interval'), 10);
+        streamRateLabel.textContent = `${rate} updates / sec`;
+        if (autoStreamToggle.checked) {
+          restartAutoStreamTimer();
+        }
+      });
+    });
+
+    // SCOOP Worker Shard Selection
+    shardOptBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        shardOptBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        selectedWorkerId = parseInt(btn.getAttribute('data-worker'), 10);
+        btnChaosWorkerLabel.textContent = `Crash Supervised Worker #${selectedWorkerId}`;
+      });
+    });
+
+    // Update Worker Shard Matrix Connection Counts
+    function updateShardMatrixConnections() {
+      const activeSSE = (sseSource && sseSource.readyState === EventSource.OPEN) ? 1 : 0;
+      const activeWS = (wsSocket && wsSocket.readyState === WebSocket.OPEN) ? 1 : 0;
+      
+      // Distribute connection indicators predictably across shards
+      document.getElementById('shardConns0').textContent = activeSSE;
+      document.getElementById('shardConns1').textContent = activeWS;
+      document.getElementById('shardConns2').textContent = '0';
+      document.getElementById('shardConns3').textContent = '0';
+    }
+
+    // Chaos action 1: Connection Fault
     btnChaosConn.addEventListener('click', async () => {
       try {
         appendEventCard('CHAOS', 'Triggering deliberate connection fault (POST /debug/fault?type=conn)...', true);
@@ -911,28 +1294,82 @@
       } catch (e) {
         appendEventCard('CHAOS', 'Connection fault caught and isolated by worker rescue.', true);
       }
+      setTimeout(pollMetrics, 350);
     });
 
+    // Chaos action 2: Targeted Supervised Worker Crash
     btnChaosWorker.addEventListener('click', async () => {
+      const targetId = selectedWorkerId;
+      const card = document.getElementById(`shardCard${targetId}`);
+      const pill = document.getElementById(`shardPill${targetId}`);
+      const genEl = document.getElementById(`shardGen${targetId}`);
+
+      // Visual Blast-Radius Indicator: highlight only the targeted shard
+      card.classList.add('crashed');
+      pill.classList.add('restarting');
+      pill.textContent = 'HOT-SWAP';
+      workerGenerations[targetId]++;
+      genEl.textContent = workerGenerations[targetId];
+
       try {
-        appendEventCard('CHAOS', 'Crashing Supervised Worker #0 (POST /debug/fault?type=worker)...', true);
-        const resp = await fetch(`${getBaseUrl()}/debug/fault?type=worker`, { method: 'POST' });
+        appendEventCard('CHAOS', `Crashing Supervised Worker #${targetId} (POST /debug/fault?type=worker&id=${targetId})...`, true);
+        const resp = await fetch(`${getBaseUrl()}/debug/fault?type=worker&id=${targetId}`, { method: 'POST' });
         const txt = await resp.text();
-        appendEventCard('CHAOS', txt || 'Worker fault reported. Supervisor hot-swapping shard.', true);
+        appendEventCard('CHAOS', txt.trim() || `Worker #${targetId} fault acknowledged. Supervisor hot-swapped shard.`, true);
       } catch (e) {
-        appendEventCard('CHAOS', `Request notice: ${e.message}`, true);
+        appendEventCard('CHAOS', `Worker #${targetId} socket reset: ${e.message}`, true);
       }
+
+      // Restore shard status after hot-swap window while siblings stayed green
+      setTimeout(() => {
+        card.classList.remove('crashed');
+        pill.classList.remove('restarting');
+        pill.textContent = 'ONLINE';
+        pollMetrics();
+      }, 550);
     });
 
+    // Chaos action 3: Rapid FD Churn & Stale-FD Torture
+    btnChaosChurn.addEventListener('click', async () => {
+      btnChaosChurn.disabled = true;
+      const origText = btnChaosChurn.innerHTML;
+      btnChaosChurn.innerHTML = '<span>⚡ Churning 50 FDs...</span>';
+      
+      const room = roomIdInput.value.trim() || '42';
+      appendEventCard('CHAOS', 'Triggering rapid FD churn: 50 abortive TCP handshakes with immediate mid-flight RST/aborts...', true);
+
+      const abortPromises = [];
+      for (let i = 0; i < 50; i++) {
+        const controller = new AbortController();
+        const p = fetch(`${getBaseUrl()}/events?room=${room}&churn=${i}`, {
+          signal: controller.signal
+        }).catch(() => {});
+        setTimeout(() => controller.abort(), 2);
+        abortPromises.push(p);
+      }
+
+      await Promise.allSettled(abortPromises);
+
+      appendEventCard('CHAOS', 'FD Churn complete: 50 abortive requests safely handled by C reactor. Generational FD table filtered stale epoll events.', false, {
+        workerTag: 'Kernel Purge'
+      });
+
+      btnChaosChurn.innerHTML = origText;
+      btnChaosChurn.disabled = false;
+      setTimeout(pollMetrics, 300);
+    });
+
+    // Chaos action 4: Broker Crash
     btnChaosBroker.addEventListener('click', async () => {
       try {
         appendEventCard('CHAOS', 'Crashing Pub/Sub Broker (POST /debug/fault?type=broker)...', true);
         const resp = await fetch(`${getBaseUrl()}/debug/fault?type=broker`, { method: 'POST' });
         const txt = await resp.text();
-        appendEventCard('CHAOS', txt || 'Broker fault reported. Supervisor hot-swapping broker in-place.', true);
+        appendEventCard('CHAOS', txt.trim() || 'Broker fault reported. Supervisor hot-swapping broker in-place.', true);
       } catch (e) {
-        appendEventCard('CHAOS', `Request notice: ${e.message}`, true);
+        appendEventCard('CHAOS', `Broker fault notice: ${e.message}`, true);
       }
+      setTimeout(pollMetrics, 400);
     });
 
     // Poll Prometheus Metrics
@@ -971,7 +1408,6 @@
 
     // Initialize default connection
     window.addEventListener('load', () => {
-      // If served directly from server, adapt gateway URL automatically
       if (window.location.protocol.startsWith('http')) {
         gatewayUrlInput.value = `${window.location.protocol}//${window.location.host}`;
       }

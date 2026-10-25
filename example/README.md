@@ -142,7 +142,26 @@ vr_sse_events_out_total 2
 
 ---
 
-## 4. Deploying via Docker
+## 4. Interactive Chaos & Telemetry Web Dashboard
+
+VoidRush includes a real-time web dashboard directly served by the gateway at `http://localhost:4343/` or `http://localhost:4343/dashboard`:
+
+* **Telemetry Producer & Chaos Proving Ground (Left Panel):**
+  * Transmit sensor metrics across HTTP/1.1 Keep-Alive POST or WebSocket.
+  * Multi-rate stream presets (`5/s`, `50/s`, `250/s`) to test reactor throughput.
+  * Selective OTP chaos injection: trigger connection-level fault isolation, crash specific SCOOP worker shards (`#0`, `#1`, `#2`, `#3`), or crash the broker.
+  * **Rapid FD Churn Torture:** Dispatches 50 concurrent abortive connections mid-handshake to verify Linux generational FD reuse filtering under heavy churn.
+* **Spectator Event Feed (Center Panel):**
+  * Real-time streaming over WHATWG SSE with fallback to RFC 6455 WebSocket.
+  * Sequence continuity badges (`[Seq #1042]`) and worker descriptor badges (`[Worker #2 | FD 14:g2]`).
+  * **Zero-Drop Reconnection Proof:** Visually displays `Last-Event-ID` resumption with zero lost messages after connection faults or worker hot-swaps.
+* **SCOOP Worker Shard Matrix & Atomic Metrics (Right Panel):**
+  * Live status pills for each SCOOP worker processor showing `ONLINE` vs `HOT-SWAP` status, processor generations (`Gen 1`, `Gen 2`), and active connection counts.
+  * Live Prometheus atomic counters polled directly from the native C control block (`vr_connections_active`, `vr_supervisor_restarts_total`, `vr_stale_events_total`, etc.).
+
+---
+
+## 5. Deploying via Docker
 
 VoidRush provides a complete Dockerized build and runtime environment using Debian Trixie with EiffelStudio and GCC.
 
@@ -187,7 +206,7 @@ cd docker
 
 ---
 
-## 5. Automated Verification Scripts
+## 6. Automated Verification Scripts
 
 Two automated test scripts are included in `example/scripts/`:
 

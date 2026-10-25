@@ -850,12 +850,22 @@ feature {NONE} -- Inbound Protocol Pipeline
 			w_id: INTEGER
 		do
 			if http_parser.query_slice.has_substring_case_insensitive (in_buf, "worker") then
-				w_id := fd \\ 4
+				if http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=1") then
+					w_id := 1
+				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=2") then
+					w_id := 2
+				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=3") then
+					w_id := 3
+				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=0") then
+					w_id := 0
+				else
+					w_id := fd \\ 4
+				end
 				if reactor_handle /= default_pointer then
 					{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, w_id)
 					{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
 				end
-				append_standard_response ("Fault Injected: Worker Crashed%N")
+				append_standard_response ("Fault Injected: Worker #" + w_id.out + " Crashed%N")
 			elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "broker") then
 				if reactor_handle /= default_pointer then
 					{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (reactor_handle)
