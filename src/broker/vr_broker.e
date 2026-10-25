@@ -35,10 +35,58 @@ feature -- Configuration
 			worker_added: workers.count = old workers.count + 1
 		end
 
+	replace_worker (a_index: INTEGER; a_worker: separate VR_WORKER)
+			-- Hot-swap worker slot `a_index` in fan-out array following worker restart.
+		require
+			valid_index: a_index >= 0 and a_index < worker_count
+			valid_worker: a_worker /= Void
+			not_shutdown: not is_shutdown
+		do
+			workers.put (a_worker, a_index)
+		ensure
+			worker_replaced: workers.item (a_index) = a_worker
+		end
+
+	set_reactor_handle (a_handle: POINTER)
+			-- Set native reactor handle for heartbeat and fault signaling.
+		require
+			valid_handle: a_handle /= default_pointer
+		do
+			reactor_handle := a_handle
+		ensure
+			handle_set: reactor_handle = a_handle
+		end
+
 feature -- Access
+
+	worker_count: INTEGER
+			-- Total number of registered worker shards
+		do
+			Result := workers.count
+		end
 
 	is_shutdown: BOOLEAN
 			-- Has broker been gracefully shut down?
+
+	reactor_handle: POINTER
+			-- Direct pointer to native vr_reactor_t
+
+feature -- Supervision Commands
+
+	on_supervisor_tick (a_now_ms: NATURAL_64)
+			-- Periodic supervisor heartbeat tick recorded into C control block.
+		require
+			valid_time: a_now_ms > 0
+		do
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_beat_broker (reactor_handle, a_now_ms)
+			end
+		rescue
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (reactor_handle)
+				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+			end
+		end
 
 feature -- Pub/Sub Commands (Invoked from Workers)
 
@@ -59,6 +107,11 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 				dispatch_room_publish (workers.item (i), a_room_id, a_msg_handle)
 				i := i + 1
 			end
+		rescue
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (reactor_handle)
+				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+			end
 		end
 
 	publish_sse (a_room_id: INTEGER; a_msg_handle: POINTER)
@@ -77,6 +130,11 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 			loop
 				dispatch_sse_room_publish (workers.item (i), a_room_id, a_msg_handle)
 				i := i + 1
+			end
+		rescue
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (reactor_handle)
+				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
 			end
 		end
 

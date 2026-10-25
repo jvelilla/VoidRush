@@ -70,6 +70,12 @@ feature -- Access
 	sse_dropped_backpressure_total: NATURAL_64
 			-- Cumulative total SSE events dropped due to client backpressure
 
+	supervisor_restarts_total: NATURAL_64
+			-- Cumulative total child restarts triggered by supervisor
+
+	supervisor_isolated_faults_total: NATURAL_64
+			-- Cumulative total connection faults isolated without child crash
+
 feature -- Status Report
 
 	refresh (a_handle: POINTER)
@@ -96,6 +102,8 @@ feature -- Status Report
 			sse_events_out_total := buf.read_natural_64 (96)
 			sse_heartbeats_total := buf.read_natural_64 (104)
 			sse_dropped_backpressure_total := buf.read_natural_64 (112)
+			supervisor_restarts_total := buf.read_natural_64 (120)
+			supervisor_isolated_faults_total := buf.read_natural_64 (128)
 		end
 
 feature -- Output
@@ -118,7 +126,9 @@ feature -- Output
 			Result.append (", sse_streams=" + sse_streams_total.out)
 			Result.append (", sse_out=" + sse_events_out_total.out)
 			Result.append (", sse_hb=" + sse_heartbeats_total.out)
-			Result.append (", sse_dropped=" + sse_dropped_backpressure_total.out + "]")
+			Result.append (", sse_dropped=" + sse_dropped_backpressure_total.out)
+			Result.append (", sup_restarts=" + supervisor_restarts_total.out)
+			Result.append (", sup_faults=" + supervisor_isolated_faults_total.out + "]")
 		end
 
 end

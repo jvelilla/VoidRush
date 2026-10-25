@@ -19,4 +19,7 @@ Push-Location $ScriptDir
 docker compose down 2>$null
 Pop-Location
 
+# Stop any orphan compilation containers
+docker ps -q --filter "ancestor=voidrush/tool-eiffel-compilation" | ForEach-Object { docker rm -f $_ 2>$null }
+
 Write-Host "Clean completed successfully."

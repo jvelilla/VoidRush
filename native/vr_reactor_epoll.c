@@ -36,6 +36,17 @@ struct vr_reactor {
     uint64_t sse_events_out_total;
     uint64_t sse_heartbeats_total;
     uint64_t sse_dropped_backpressure_total;
+    /* Phase 7 Supervision metrics */
+    uint64_t supervisor_restarts_total;
+    uint64_t supervisor_isolated_faults_total;
+
+    /* Phase 7 Control Block */
+    uint64_t reactor_heartbeat_ms;
+    uint64_t broker_heartbeat_ms;
+    uint64_t worker_heartbeats_ms[VR_MAX_WORKERS];
+    uint64_t child_fault_mask; /* Bit 63: Broker; Bits 0..62: Worker ID */
+    int16_t  fd_owner[VR_MAX_TRACKED_FDS];
+
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
 
@@ -61,6 +72,10 @@ vr_reactor_t *vr_reactor_create(void) {
 
     vr_reactor_t *r = (vr_reactor_t *)calloc(1, sizeof(vr_reactor_t));
     if (!r) return NULL;
+
+    for (int i = 0; i < VR_MAX_TRACKED_FDS; i++) {
+        r->fd_owner[i] = -1;
+    }
 
     r->epfd = epoll_create1(EPOLL_CLOEXEC);
     if (r->epfd < 0) {
@@ -125,6 +140,9 @@ int vr_reactor_mod(vr_reactor_t *r, int fd, uint32_t flags, uint32_t generation)
 }
 
 int vr_reactor_del(vr_reactor_t *r, int fd) {
+    if (r && fd >= 0 && fd < VR_MAX_TRACKED_FDS) {
+        r->fd_owner[fd] = -1;
+    }
     return epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
 }
 
@@ -435,5 +453,97 @@ void vr_reactor_get_metrics(const vr_reactor_t *r, vr_reactor_metrics_t *out) {
         out->sse_events_out_total          = __atomic_load_n(&r->sse_events_out_total, __ATOMIC_RELAXED);
         out->sse_heartbeats_total          = __atomic_load_n(&r->sse_heartbeats_total, __ATOMIC_RELAXED);
         out->sse_dropped_backpressure_total = __atomic_load_n(&r->sse_dropped_backpressure_total, __ATOMIC_RELAXED);
+        /* Phase 7 */
+        out->supervisor_restarts_total      = __atomic_load_n(&r->supervisor_restarts_total, __ATOMIC_RELAXED);
+        out->supervisor_isolated_faults_total = __atomic_load_n(&r->supervisor_isolated_faults_total, __ATOMIC_RELAXED);
     }
 }
+
+/* Phase 7: Atomic Liveness Heartbeats */
+void vr_reactor_beat_reactor(vr_reactor_t *r, uint64_t now_ms) {
+    if (!r) return;
+    __atomic_store_n(&r->reactor_heartbeat_ms, now_ms, __ATOMIC_RELEASE);
+}
+
+void vr_reactor_beat_broker(vr_reactor_t *r, uint64_t now_ms) {
+    if (!r) return;
+    __atomic_store_n(&r->broker_heartbeat_ms, now_ms, __ATOMIC_RELEASE);
+}
+
+void vr_reactor_beat_worker(vr_reactor_t *r, int worker_id, uint64_t now_ms) {
+    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return;
+    __atomic_store_n(&r->worker_heartbeats_ms[worker_id], now_ms, __ATOMIC_RELEASE);
+}
+
+uint64_t vr_reactor_get_reactor_beat(const vr_reactor_t *r) {
+    if (!r) return 0;
+    return __atomic_load_n(&r->reactor_heartbeat_ms, __ATOMIC_ACQUIRE);
+}
+
+uint64_t vr_reactor_get_broker_beat(const vr_reactor_t *r) {
+    if (!r) return 0;
+    return __atomic_load_n(&r->broker_heartbeat_ms, __ATOMIC_ACQUIRE);
+}
+
+uint64_t vr_reactor_get_worker_beat(const vr_reactor_t *r, int worker_id) {
+    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return 0;
+    return __atomic_load_n(&r->worker_heartbeats_ms[worker_id], __ATOMIC_ACQUIRE);
+}
+
+/* Phase 7: Atomic Fault Reporting & Consumption */
+void vr_reactor_report_broker_fault(vr_reactor_t *r) {
+    if (!r) return;
+    uint64_t mask = ((uint64_t)1) << 63;
+    __atomic_or_fetch(&r->child_fault_mask, mask, __ATOMIC_SEQ_CST);
+}
+
+void vr_reactor_report_worker_fault(vr_reactor_t *r, int worker_id) {
+    if (!r || worker_id < 0 || worker_id >= 63) return;
+    uint64_t mask = ((uint64_t)1) << worker_id;
+    __atomic_or_fetch(&r->child_fault_mask, mask, __ATOMIC_SEQ_CST);
+}
+
+uint64_t vr_reactor_consume_fault_mask(vr_reactor_t *r) {
+    if (!r) return 0;
+    return __atomic_exchange_n(&r->child_fault_mask, 0, __ATOMIC_SEQ_CST);
+}
+
+/* Phase 7: Shard FD Ownership & Purge */
+void vr_reactor_set_fd_owner(vr_reactor_t *r, int fd, int16_t worker_id) {
+    if (!r || fd < 0 || fd >= VR_MAX_TRACKED_FDS) return;
+    r->fd_owner[fd] = worker_id;
+}
+
+int16_t vr_reactor_get_fd_owner(const vr_reactor_t *r, int fd) {
+    if (!r || fd < 0 || fd >= VR_MAX_TRACKED_FDS) return -1;
+    return r->fd_owner[fd];
+}
+
+int vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id) {
+    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return 0;
+    int purged = 0;
+    for (int fd = 0; fd < VR_MAX_TRACKED_FDS; fd++) {
+        if (r->fd_owner[fd] == (int16_t)worker_id) {
+            epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
+            close(fd);
+            r->fd_owner[fd] = -1;
+            if (r->active_connections > 0) {
+                __atomic_sub_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
+            }
+            purged++;
+        }
+    }
+    return purged;
+}
+
+/* Phase 7: Supervision Metrics Counters */
+void vr_reactor_metric_inc_restarts(vr_reactor_t *r) {
+    if (!r) return;
+    __atomic_fetch_add(&r->supervisor_restarts_total, 1, __ATOMIC_RELAXED);
+}
+
+void vr_reactor_metric_inc_isolated_faults(vr_reactor_t *r) {
+    if (!r) return;
+    __atomic_fetch_add(&r->supervisor_isolated_faults_total, 1, __ATOMIC_RELAXED);
+}
+

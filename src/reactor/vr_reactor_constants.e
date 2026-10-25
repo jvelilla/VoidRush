@@ -156,7 +156,63 @@ feature -- Buffer and Pool Configuration
 	Default_backlog: INTEGER = 1024
 			-- Default TCP listen queue backlog
 
-	Metrics_size: INTEGER = 120
-			-- Size in bytes of vr_reactor_metrics_t (15 * uint64_t)
+	Metrics_size: INTEGER = 136
+			-- Size in bytes of vr_reactor_metrics_t (17 * uint64_t)
+
+feature -- Phase 7 Supervision Child Kinds
+
+	Child_reactor: INTEGER = 1
+			-- C Epoll Reactor child component
+
+	Child_broker: INTEGER = 2
+			-- Pub/Sub Broker router child component
+
+	Child_worker: INTEGER = 3
+			-- Worker partition shard child component
+
+feature -- Phase 7 Child Restart Policies
+
+	Restart_permanent: INTEGER = 1
+			-- Always restart child upon failure (e.g. Broker, Worker)
+
+	Restart_transient: INTEGER = 2
+			-- Restart only if abnormal exit / failure occurs (e.g. Reactor)
+
+	Restart_temporary: INTEGER = 3
+			-- Never restart child
+
+feature -- Phase 7 Child Lifecycle States
+
+	State_stopped: INTEGER = 0
+			-- Component is stopped
+
+	State_starting: INTEGER = 4
+			-- Component is initializing
+
+	State_running: INTEGER = 5
+			-- Component is actively running
+
+	State_stopping: INTEGER = 6
+			-- Component is terminating
+
+	State_failed: INTEGER = 7
+			-- Component encountered unhandled fault
+
+feature -- Phase 7 Supervision Limits & Timeouts
+
+	Max_workers: INTEGER = 64
+			-- Maximum number of worker shards supported by C control block
+
+	Default_max_restarts: INTEGER = 3
+			-- Maximum restarts within intensity window before fatal exit
+
+	Default_intensity_window_ms: NATURAL_64 = 30000
+			-- 30 seconds sliding window for restart rate limiting
+
+	Default_liveness_timeout_ms: NATURAL_64 = 5000
+			-- 5 seconds stale heartbeat threshold
+
+	Supervisor_health_tick_ms: INTEGER = 250
+			-- 250 ms supervisor health check interval
 
 end

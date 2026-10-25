@@ -29,6 +29,7 @@ feature {NONE} -- Initialization
 			create rooms.make (64)
 			create sse_rooms.make (64)
 			create scratch_buffer.make (Scratch_buffer_size)
+			current_fd := -1
 			is_shutdown_complete := False
 			protocol := Proto_http_reading_headers
 		ensure
@@ -43,6 +44,9 @@ feature -- Access
 
 	worker_id: INTEGER
 			-- Unique partition index
+
+	current_fd: INTEGER
+			-- FD currently being processed during on_socket_event for fault isolation
 
 	reactor_handle: POINTER
 			-- Pointer to native vr_reactor_t instance
@@ -83,6 +87,16 @@ feature -- Configuration
 			proto_set: protocol = a_proto
 		end
 
+	set_broker (a_broker: separate VR_BROKER)
+			-- Update shared broker reference upon supervisor broker restart.
+		require
+			valid_broker: a_broker /= Void
+		do
+			broker := a_broker
+		ensure
+			broker_set: broker = a_broker
+		end
+
 feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 
 	register_connection (a_fd: INTEGER; a_generation: NATURAL_32)
@@ -108,6 +122,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			conn.set_sse_room_join_handler (agent join_sse_room)
 			connections.force (conn, a_fd)
 			{VR_REACTOR_BRIDGE}.c_metric_inc_open (reactor_handle)
+			{VR_REACTOR_BRIDGE}.c_reactor_set_fd_owner (reactor_handle, a_fd, worker_id.to_integer_16)
 
 			-- Configure TCP User Timeout (30s)
 			res := {VR_REACTOR_BRIDGE}.c_reactor_set_tcp_user_timeout (a_fd, 30000)
@@ -130,6 +145,11 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			read_turn, write_turn, chunk, n, res: INTEGER
 			read_done, write_done: BOOLEAN
 		do
+			current_fd := a_fd
+			if is_fault_injected then
+				is_fault_injected := False
+				check test_isolated_fault: False end
+			end
 			if attached connections.item (a_fd) as conn and then conn.matches (a_generation) then
 				now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
 
@@ -221,6 +241,21 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 				-- Stale event for an obsolete generation or unregistered socket
 				{VR_REACTOR_BRIDGE}.c_metric_inc_stale (reactor_handle)
 			end
+			current_fd := -1
+		rescue
+			if current_fd >= 0 then
+				close_connection (current_fd)
+				current_fd := -1
+				if reactor_handle /= default_pointer then
+					{VR_REACTOR_BRIDGE}.c_metric_inc_isolated_faults (reactor_handle)
+				end
+				retry
+			else
+				if reactor_handle /= default_pointer then
+					{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, worker_id)
+					{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+				end
+			end
 		end
 
 	on_timer_tick (a_now_ms: NATURAL_64)
@@ -232,6 +267,10 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			hb_ptr: POINTER
 			c_hb: ANY
 		do
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_beat_worker (reactor_handle, worker_id, a_now_ms)
+			end
+
 			create expired_fds.make (64)
 			c_hb := Sse_heartbeat_comment.to_c
 			hb_ptr := $c_hb
@@ -257,6 +296,11 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			loop
 				{VR_REACTOR_BRIDGE}.c_metric_inc_idle_timeouts (reactor_handle)
 				close_connection (fd_ic)
+			end
+		rescue
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, worker_id)
+				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
 			end
 		end
 
@@ -359,6 +403,12 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			end
 			-- Decrement reference count; last worker automatically frees C memory
 			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+		rescue
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, worker_id)
+				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+			end
 		end
 
 	deliver_frame_to_connection (a_conn: VR_CONNECTION; a_ptr: POINTER; a_len: INTEGER)
@@ -508,6 +558,12 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			end
 			-- Decrement reference count; last worker frees memory atomically
 			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+		rescue
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+			if reactor_handle /= default_pointer then
+				{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, worker_id)
+				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+			end
 		end
 
 feature {NONE} -- SCOOP Broker Dispatch
@@ -551,6 +607,7 @@ feature {NONE} -- Implementation
 				end
 				conn.mark_closed
 				connections.remove (a_fd)
+				{VR_REACTOR_BRIDGE}.c_reactor_set_fd_owner (reactor_handle, a_fd, -1)
 				res := {VR_REACTOR_BRIDGE}.c_reactor_del (reactor_handle, a_fd)
 				res := {VR_REACTOR_BRIDGE}.c_close (a_fd)
 				{VR_REACTOR_BRIDGE}.c_metric_dec_open (reactor_handle)
@@ -558,6 +615,20 @@ feature {NONE} -- Implementation
 		ensure
 			not_in_table: not connections.has (a_fd)
 		end
+
+feature -- Testing & Fault Injection
+
+	inject_next_event_fault
+			-- Instruct worker to raise an assertion during next socket event turn to test isolated rescue.
+		do
+			is_fault_injected := True
+		ensure
+			fault_armed: is_fault_injected
+		end
+
+feature {NONE} -- Testing State
+
+	is_fault_injected: BOOLEAN
 
 invariant
 	valid_id: worker_id >= 0

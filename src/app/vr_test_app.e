@@ -91,7 +91,22 @@ feature {NONE} -- Initialization
 			io.put_string ("[vr_test_app] Testing Phase 6 SSE client disconnect cleanup without ghost deliveries...%N")
 			test_end_to_end_sse_disconnect_cleanup
 
-			io.put_string ("[vr_test_app] All Eiffel Phase 3, Phase 4, Phase 5, and Phase 6 tests passed successfully!%N")
+			io.put_string ("[vr_test_app] Testing Phase 7 sliding-window restart intensity limiter...%N")
+			test_restart_intensity
+
+			io.put_string ("[vr_test_app] Testing Phase 7 root supervisor deterministic lifecycle & heartbeats...%N")
+			test_supervisor_lifecycle
+
+			io.put_string ("[vr_test_app] Testing Phase 7 single-connection fault isolation & rescue...%N")
+			test_connection_fault_isolation
+
+			io.put_string ("[vr_test_app] Testing Phase 7 live broker crash & hot-swap...%N")
+			test_broker_hot_swap
+
+			io.put_string ("[vr_test_app] Testing Phase 7 worker crash, shard FD purge & intensity trip...%N")
+			test_worker_crash_and_intensity
+
+			io.put_string ("[vr_test_app] All Eiffel Phase 3, Phase 4, Phase 5, Phase 6, and Phase 7 tests passed successfully!%N")
 		end
 
 feature {NONE} -- Tests
@@ -294,6 +309,7 @@ feature {NONE} -- Tests
 			m: VR_METRICS
 		do
 			create engine.make (Test_port + 1, 4)
+			engine.start
 			check port_ok: engine.port = Test_port + 1 end
 			check workers_ok: engine.worker_count = 4 end
 			check handle_ok: engine.reactor_handle /= default_pointer end
@@ -1571,6 +1587,438 @@ feature {NONE} -- Phase 6 SSE Tests & Helpers
 			create cs.make (req)
 			res := {VR_REACTOR_BRIDGE}.c_send (a_sock, cs.item, cs.count)
 			check sent_post_req: res = cs.count end
+		end
+
+feature {NONE} -- Phase 7 Supervision Tests & Helpers
+
+	test_restart_intensity
+			-- T7.1: Verify sliding-window restart rate limiter (3 in 30s).
+		local
+			lim: VR_RESTART_INTENSITY
+		do
+			create lim.make
+			check initial_count: lim.count = 0 end
+			check initial_allowed: lim.allow_restart (1000) end
+
+			-- 1st restart at t = 1000 ms
+			check allow_1: lim.allow_restart (1000) end
+			lim.record_restart (1000)
+			check count_1: lim.count = 1 end
+
+			-- 2nd restart at t = 5000 ms
+			check allow_2: lim.allow_restart (5000) end
+			lim.record_restart (5000)
+			check count_2: lim.count = 2 end
+
+			-- 3rd restart at t = 10000 ms
+			check allow_3: lim.allow_restart (10000) end
+			lim.record_restart (10000)
+			check count_3: lim.count = 3 end
+
+			-- 4th restart at t = 15000 ms (within 30s window): MUST be rejected
+			check reject_4: not lim.allow_restart (15000) end
+
+			-- Advance time past the 30s window from t = 1000 ms to t = 32000 ms
+			-- (32000 - 1000 = 31000 > 30000, so t = 1000 is expired)
+			check allow_after_window: lim.allow_restart (32000) end
+			lim.record_restart (32000)
+			check count_after_purge: lim.count = 3 end
+
+			-- Test reset
+			lim.reset
+			check reset_count: lim.count = 0 end
+			check allow_after_reset: lim.allow_restart (33000) end
+		end
+
+	test_supervisor_lifecycle
+			-- T7.2: Verify root supervisor ordered start, child state transitions, health beats, and ordered stop.
+		local
+			sup: separate VR_SUPERVISOR
+			c1, res, i, n, total_read: INTEGER
+			req: C_STRING
+			recv_buf: MANAGED_POINTER
+			resp_str: STRING_8
+			r_handle: POINTER
+			hb_reactor: NATURAL_64
+		do
+			create sup.make (Test_port + 20, 2)
+			check not_running_initially: not is_supervisor_running (sup) end
+			check reactor_stopped_initially: get_reactor_state (sup) = State_stopped end
+			check broker_stopped_initially: get_broker_state (sup) = State_stopped end
+			check worker0_stopped_initially: get_worker_state (sup, 0) = State_stopped end
+
+			-- Start all supervised components
+			start_supervisor (sup)
+			check running: is_supervisor_running (sup) end
+			check reactor_running: get_reactor_state (sup) = State_running end
+			check broker_running: get_broker_state (sup) = State_running end
+			check worker0_running: get_worker_state (sup, 0) = State_running end
+			check worker1_running: get_worker_state (sup, 1) = State_running end
+
+			r_handle := get_supervisor_reactor_handle (sup)
+			check valid_r_handle: r_handle /= default_pointer end
+
+			-- Connect client to Test_port + 20
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 20)
+			check c1_connected: c1 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			create req.make ("GET /healthz HTTP/1.1%R%NHost: localhost%R%N%R%N")
+			res := {VR_REACTOR_BRIDGE}.c_send (c1, req.item, req.count)
+			check req_sent: res = req.count end
+
+			create recv_buf.make (256)
+			from
+				i := 0
+				total_read := 0
+			until
+				i >= 40 or total_read > 0
+			loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (15)
+				n := {VR_REACTOR_BRIDGE}.c_reactor_read (c1, recv_buf.item, 256)
+				if n > 0 then
+					total_read := total_read + n
+				end
+				i := i + 1
+			end
+			check got_healthz: total_read > 0 end
+			recv_buf.put_integer_8 (0, total_read)
+			resp_str := (create {C_STRING}.make_by_pointer (recv_buf.item)).string
+			check http_200: resp_str.has_substring ("200 OK") end
+
+			-- Verify reactor heartbeat was recorded
+			hb_reactor := {VR_REACTOR_BRIDGE}.c_reactor_get_reactor_beat (r_handle)
+			check reactor_beat_alive: hb_reactor > 0 end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+
+			-- Stop supervisor
+			stop_supervisor (sup)
+			check stopped: not is_supervisor_running (sup) end
+			check reactor_stopped: get_reactor_state (sup) = State_stopped end
+			check broker_stopped: get_broker_state (sup) = State_stopped end
+			check worker0_stopped: get_worker_state (sup, 0) = State_stopped end
+			check worker1_stopped: get_worker_state (sup, 1) = State_stopped end
+		end
+
+	test_connection_fault_isolation
+			-- T7.3: Verify worker rescue catches connection fault on C1, increments isolated fault metric,
+			-- closes C1, and allows C2 to continue echoing normally without worker death.
+		local
+			sup: separate VR_SUPERVISOR
+			c1, c2, res, i, n, total_read: INTEGER
+			r_handle: POINTER
+			m: VR_METRICS
+			req: C_STRING
+			recv_buf: MANAGED_POINTER
+			resp_str: STRING_8
+		do
+			create sup.make (Test_port + 21, 1)
+			start_supervisor (sup)
+			check running: is_supervisor_running (sup) end
+
+			r_handle := get_supervisor_reactor_handle (sup)
+			create m.make_from_pointer (r_handle)
+
+			-- Connect C1 and C2
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 21)
+			c2 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 21)
+			check c1_connected: c1 >= 0 and c2 >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c2)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (15)
+				m.refresh (r_handle)
+				i := i + 1
+			end
+			check two_accepted: m.accepts_total = 2 and m.active_connections = 2 end
+			check initial_faults_zero: m.supervisor_isolated_faults_total = 0 end
+
+			-- Arm isolated fault injection on worker 0
+			arm_worker_fault (sup, 0)
+
+			-- Client C1 sends data -> triggers injected fault during on_socket_event for C1
+			create req.make ("GET /healthz HTTP/1.1%R%NHost: localhost%R%N%R%N")
+			res := {VR_REACTOR_BRIDGE}.c_send (c1, req.item, req.count)
+
+			-- Poll until isolated fault metric is incremented
+			from i := 0 until i >= 30 or m.supervisor_isolated_faults_total >= 1 loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (15)
+				m.refresh (r_handle)
+				i := i + 1
+			end
+			check fault_isolated: m.supervisor_isolated_faults_total = 1 end
+			check worker_still_running: get_worker_state (sup, 0) = State_running end
+
+			-- Verify C1 was closed by reading EOF (0 bytes) or error
+			create recv_buf.make (256)
+			n := {VR_REACTOR_BRIDGE}.c_reactor_read (c1, recv_buf.item, 256)
+			check c1_closed: n <= 0 end
+
+			-- Client C2 sends normal request -> worker 0 processes it normally
+			res := {VR_REACTOR_BRIDGE}.c_send (c2, req.item, req.count)
+			check c2_sent: res = req.count end
+
+			from
+				i := 0
+				total_read := 0
+			until
+				i >= 30 or total_read > 0
+			loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (15)
+				n := {VR_REACTOR_BRIDGE}.c_reactor_read (c2, recv_buf.item, 256)
+				if n > 0 then
+					total_read := total_read + n
+				end
+				i := i + 1
+			end
+			check c2_got_response: total_read > 0 end
+			recv_buf.put_integer_8 (0, total_read)
+			resp_str := (create {C_STRING}.make_by_pointer (recv_buf.item)).string
+			check c2_status_200: resp_str.has_substring ("200 OK") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+			res := {VR_REACTOR_BRIDGE}.c_close (c2)
+			stop_supervisor (sup)
+		end
+
+	test_broker_hot_swap
+			-- T7.4: Verify live broker hot-swap when broker fault is reported.
+			-- Room subscriptions and cross-protocol messaging continue across new broker.
+		local
+			sup: separate VR_SUPERVISOR
+			c_sse, c_ws, res, i: INTEGER
+			r_handle: POINTER
+			m: VR_METRICS
+			resp_sse, resp_ws, evt: STRING_8
+			now_ms: NATURAL_64
+		do
+			create sup.make (Test_port + 22, 2)
+			start_supervisor (sup)
+			r_handle := get_supervisor_reactor_handle (sup)
+			create m.make_from_pointer (r_handle)
+
+			c_sse := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 22)
+			c_ws := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 22)
+			check conns_ok: c_sse >= 0 and c_ws >= 0 end
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c_sse)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c_ws)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (15)
+				m.refresh (r_handle)
+				i := i + 1
+			end
+
+			-- Setup SSE client subscription
+			send_sse_request (c_sse, "")
+			resp_sse := read_response_from_supervisor (c_sse, sup, 40)
+			check sse_subscribed: resp_sse.has_substring ("200 OK") end
+
+			-- Setup WS client upgrade
+			send_ws_upgrade (c_ws, "dGhlIHNhbXBsZSBub25jZQ==", "13")
+			resp_ws := read_response_from_supervisor (c_ws, sup, 40)
+			check ws_upgraded: resp_ws.has_substring ("101 Switching Protocols") end
+
+			-- Simulate broker fault reported to C control block
+			{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (r_handle)
+			{VR_REACTOR_BRIDGE}.c_reactor_wake (r_handle)
+
+			-- Trigger supervisor health check
+			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+			supervisor_check_health (sup, now_ms)
+
+			-- Verify broker child spec recorded restart and is running
+			check broker_restarted: get_broker_restart_count (sup) >= 1 end
+			check broker_healthy: get_broker_state (sup) = State_running end
+			m.refresh (r_handle)
+			check supervisor_restarts_metric: m.supervisor_restarts_total >= 1 end
+
+			-- Send cross-protocol publish after broker hot-swap
+			send_client_ws_frame (c_ws, True, Ws_opcode_text, "PUB_SSE HotSwapVerified", True)
+
+			-- Verify SSE subscriber receives event through new broker
+			evt := read_response_from_supervisor (c_sse, sup, 30)
+			check sse_received_after_hot_swap: evt.has_substring ("data: HotSwapVerified") end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c_sse)
+			res := {VR_REACTOR_BRIDGE}.c_close (c_ws)
+			stop_supervisor (sup)
+		end
+
+	test_worker_crash_and_intensity
+			-- T7.5: Verify worker crash purges shard FDs, replaces worker in slot, and
+			-- repeated crashes trip OTP intensity limiter escalating to clean process shutdown.
+		local
+			sup: separate VR_SUPERVISOR
+			c0, c1, res, i, n: INTEGER
+			r_handle: POINTER
+			m: VR_METRICS
+			now_ms: NATURAL_64
+			recv_buf: MANAGED_POINTER
+			is_fatal: BOOLEAN
+		do
+			create sup.make (Test_port + 23, 2)
+			start_supervisor (sup)
+			r_handle := get_supervisor_reactor_handle (sup)
+			create m.make_from_pointer (r_handle)
+
+			-- Connect 2 clients: client 0 on worker 0, client 1 on worker 1 (port % 2)
+			c0 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 23)
+			c1 := {VR_REACTOR_BRIDGE}.c_connect_tcp (default_pointer, Test_port + 23)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c0)
+			res := {VR_REACTOR_BRIDGE}.c_set_nonblocking (c1)
+
+			from i := 0 until i >= 20 or m.accepts_total >= 2 loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (15)
+				m.refresh (r_handle)
+				i := i + 1
+			end
+			check conns_armed: m.accepts_total = 2 and m.active_connections = 2 end
+
+			-- Simulate worker 1 crash: report fault & wake
+			{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (r_handle, 1)
+			{VR_REACTOR_BRIDGE}.c_reactor_wake (r_handle)
+
+			-- Supervisor checks health: purges shard 1 FDs, spawns replacement worker 1
+			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+			supervisor_check_health (sup, now_ms)
+
+			-- Verify worker 1 recorded restart
+			check w1_restarted: get_worker_restart_count (sup, 1) = 1 end
+			check w1_running: get_worker_state (sup, 1) = State_running end
+
+			-- Client on worker 1 should have been purged by vr_reactor_purge_worker_fds
+			create recv_buf.make (64)
+			n := {VR_REACTOR_BRIDGE}.c_reactor_read (c1, recv_buf.item, 64)
+			check c1_purged: n <= 0 end
+
+			-- Client 0 on worker 0 should still be open
+			m.refresh (r_handle)
+			check active_decremented: m.active_connections = 1 end
+
+			-- Now inject 3 rapid crashes on worker 1 to trip intensity limiter (max_restarts = 3 in 30s)
+			-- Crash 2
+			{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (r_handle, 1)
+			supervisor_check_health (sup, now_ms + 100)
+			check w1_restarts_2: get_worker_restart_count (sup, 1) = 2 end
+
+			-- Crash 3
+			{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (r_handle, 1)
+			supervisor_check_health (sup, now_ms + 200)
+			check w1_restarts_3: get_worker_restart_count (sup, 1) = 3 end
+
+			-- Crash 4 -> TRIPS INTENSITY LIMIT! Escalates to fatal shutdown.
+			{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (r_handle, 1)
+			supervisor_check_health (sup, now_ms + 300)
+
+			is_fatal := is_supervisor_fatal (sup)
+			check intensity_tripped: is_fatal end
+			check supervisor_stopped_on_fatal: not is_supervisor_running (sup) end
+
+			res := {VR_REACTOR_BRIDGE}.c_close (c0)
+			res := {VR_REACTOR_BRIDGE}.c_close (c1)
+		end
+
+	read_response_from_supervisor (a_sock: INTEGER; sup: separate VR_SUPERVISOR; a_min_bytes: INTEGER): STRING_8
+			-- Step supervisor reactor and drain up to a_min_bytes from a_sock.
+		local
+			recv_buf: MANAGED_POINTER
+			i, n, total_read: INTEGER
+		do
+			create recv_buf.make (2048)
+			from
+				i := 0
+				total_read := 0
+			until
+				i >= 40 or total_read >= a_min_bytes
+			loop
+				step_supervisor (sup, 50)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (10)
+				n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_sock, recv_buf.item + total_read, 2048 - total_read)
+				if n > 0 then
+					total_read := total_read + n
+				end
+				i := i + 1
+			end
+			if total_read > 0 then
+				recv_buf.put_integer_8 (0, total_read)
+				Result := (create {C_STRING}.make_by_pointer (recv_buf.item)).string
+			else
+				create Result.make_empty
+			end
+		end
+
+	step_supervisor (s: separate VR_SUPERVISOR; a_timeout_ms: INTEGER)
+		do
+			s.step (a_timeout_ms)
+		end
+
+	is_supervisor_running (s: separate VR_SUPERVISOR): BOOLEAN
+		do
+			Result := s.is_running
+		end
+
+	is_supervisor_fatal (s: separate VR_SUPERVISOR): BOOLEAN
+		do
+			Result := s.is_fatal_shutdown
+		end
+
+	get_reactor_state (s: separate VR_SUPERVISOR): INTEGER
+		do
+			Result := s.reactor_state
+		end
+
+	get_broker_state (s: separate VR_SUPERVISOR): INTEGER
+		do
+			Result := s.broker_state
+		end
+
+	get_worker_state (s: separate VR_SUPERVISOR; a_index: INTEGER): INTEGER
+		do
+			Result := s.worker_state (a_index)
+		end
+
+	get_broker_restart_count (s: separate VR_SUPERVISOR): INTEGER
+		do
+			Result := s.broker_restart_count
+		end
+
+	get_worker_restart_count (s: separate VR_SUPERVISOR; a_index: INTEGER): INTEGER
+		do
+			Result := s.worker_restart_count (a_index)
+		end
+
+	get_supervisor_reactor_handle (s: separate VR_SUPERVISOR): POINTER
+		do
+			Result := s.reactor_handle
+		end
+
+	start_supervisor (s: separate VR_SUPERVISOR)
+		do
+			s.start_all
+		end
+
+	stop_supervisor (s: separate VR_SUPERVISOR)
+		do
+			s.stop_all
+		end
+
+	supervisor_check_health (s: separate VR_SUPERVISOR; a_now_ms: NATURAL_64)
+		do
+			s.check_health (a_now_ms)
+		end
+
+	arm_worker_fault (s: separate VR_SUPERVISOR; a_index: INTEGER)
+		do
+			s.inject_worker_fault (a_index)
 		end
 
 feature {NONE} -- Constants

@@ -30,8 +30,8 @@ int main(void) {
     /* wake_fd should be consumed internally, returning 0 user events */
     assert(n == 0);
 
-    /* Test metrics (120 bytes) */
-    assert(sizeof(vr_reactor_metrics_t) == 120);
+    /* Test metrics (Expanded to 136 bytes for Phase 7) */
+    assert(sizeof(vr_reactor_metrics_t) == 136);
     vr_reactor_metric_inc_accept(r);
     vr_reactor_metric_inc_open(r);
     vr_reactor_metric_inc_events(r, 5);
@@ -47,6 +47,8 @@ int main(void) {
     vr_reactor_metric_inc_sse_events_out(r);
     vr_reactor_metric_inc_sse_heartbeats(r);
     vr_reactor_metric_inc_sse_dropped(r);
+    vr_reactor_metric_inc_restarts(r);
+    vr_reactor_metric_inc_isolated_faults(r);
 
     vr_reactor_metrics_t metrics;
     vr_reactor_get_metrics(r, &metrics);
@@ -65,6 +67,8 @@ int main(void) {
     assert(metrics.sse_events_out_total == 1);
     assert(metrics.sse_heartbeats_total == 1);
     assert(metrics.sse_dropped_backpressure_total == 1);
+    assert(metrics.supervisor_restarts_total == 1);
+    assert(metrics.supervisor_isolated_faults_total == 1);
 
     vr_reactor_metric_dec_open(r);
     vr_reactor_get_metrics(r, &metrics);
@@ -322,13 +326,69 @@ int main(void) {
     vr_ws_msg_unref(sse_msg);
     vr_ws_msg_unref(sse_msg);
 
-    /* 8f. TCP User Timeout helper */
-    int dummy_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (dummy_fd >= 0) {
-        int ures = vr_reactor_set_tcp_user_timeout(dummy_fd, 30000);
-        (void)ures; /* May succeed or return 0 depending on platform support */
-        close(dummy_fd);
-    }
+    /* 9. Testing Phase 7 Supervision: Heartbeats, Fault Mask & Shard FD Purge */
+    printf("[test_vr_reactor] 9. Testing Phase 7 heartbeats, fault mask, and shard FD purge...\n");
+    vr_reactor_t *sup_r = vr_reactor_create();
+    assert(sup_r != NULL);
+
+    /* 9a. Heartbeats */
+    assert(vr_reactor_get_reactor_beat(sup_r) == 0);
+    assert(vr_reactor_get_broker_beat(sup_r) == 0);
+    assert(vr_reactor_get_worker_beat(sup_r, 0) == 0);
+
+    vr_reactor_beat_reactor(sup_r, 123456ULL);
+    vr_reactor_beat_broker(sup_r, 234567ULL);
+    vr_reactor_beat_worker(sup_r, 2, 345678ULL);
+
+    assert(vr_reactor_get_reactor_beat(sup_r) == 123456ULL);
+    assert(vr_reactor_get_broker_beat(sup_r) == 234567ULL);
+    assert(vr_reactor_get_worker_beat(sup_r, 2) == 345678ULL);
+    assert(vr_reactor_get_worker_beat(sup_r, 0) == 0);
+
+    /* 9b. Fault Reporting & Consumption */
+    assert(vr_reactor_consume_fault_mask(sup_r) == 0);
+    vr_reactor_report_worker_fault(sup_r, 3);
+    vr_reactor_report_broker_fault(sup_r);
+
+    uint64_t mask = vr_reactor_consume_fault_mask(sup_r);
+    assert((mask & (1ULL << 3)) != 0);
+    assert((mask & (1ULL << 63)) != 0);
+    /* Should be cleared upon consumption */
+    assert(vr_reactor_consume_fault_mask(sup_r) == 0);
+
+    /* 9c. Shard FD Ownership & Purge */
+    int s1 = socket(AF_INET, SOCK_STREAM, 0);
+    int s2 = socket(AF_INET, SOCK_STREAM, 0);
+    int s3 = socket(AF_INET, SOCK_STREAM, 0);
+    assert(s1 >= 0 && s2 >= 0 && s3 >= 0);
+
+    vr_reactor_add(sup_r, s1, VR_REACTOR_IN, 1);
+    vr_reactor_add(sup_r, s2, VR_REACTOR_IN, 1);
+    vr_reactor_add(sup_r, s3, VR_REACTOR_IN, 1);
+
+    vr_reactor_set_fd_owner(sup_r, s1, 1);
+    vr_reactor_set_fd_owner(sup_r, s2, 1);
+    vr_reactor_set_fd_owner(sup_r, s3, 2);
+
+    assert(vr_reactor_get_fd_owner(sup_r, s1) == 1);
+    assert(vr_reactor_get_fd_owner(sup_r, s2) == 1);
+    assert(vr_reactor_get_fd_owner(sup_r, s3) == 2);
+
+    vr_reactor_metric_inc_open(sup_r);
+    vr_reactor_metric_inc_open(sup_r);
+    vr_reactor_metric_inc_open(sup_r);
+
+    int purged = vr_reactor_purge_worker_fds(sup_r, 1);
+    assert(purged == 2);
+    assert(vr_reactor_get_fd_owner(sup_r, s1) == -1);
+    assert(vr_reactor_get_fd_owner(sup_r, s2) == -1);
+    assert(vr_reactor_get_fd_owner(sup_r, s3) == 2);
+
+    /* Sockets s1 and s2 were closed by purge. s3 is closed manually. */
+    vr_reactor_del(sup_r, s3);
+    close(s3);
+
+    vr_reactor_destroy(sup_r);
 
     printf("[test_vr_reactor] All native VR reactor unit tests passed successfully!\n");
     return 0;

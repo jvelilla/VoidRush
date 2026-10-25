@@ -8,7 +8,8 @@ inherit
 	VR_REACTOR_CONSTANTS
 
 create
-	make
+	make,
+	make_with_components
 
 feature {NONE} -- Initialization
 
@@ -54,7 +55,57 @@ feature {NONE} -- Initialization
 			workers_initialized: workers.count = a_worker_count
 		end
 
+	make_with_components (a_port: INTEGER; a_handle: POINTER; a_worker_count: INTEGER; a_broker: separate VR_BROKER)
+			-- Initialize reactor with externally managed components (Phase 7 supervision).
+		require
+			valid_port: a_port > 0 and a_port <= 65535
+			valid_handle: a_handle /= default_pointer
+			valid_worker_count: a_worker_count > 0
+			valid_broker: a_broker /= Void
+		local
+			res: INTEGER
+		do
+			handle := a_handle
+			worker_count := a_worker_count
+			create workers.make_empty (a_worker_count)
+			broker := a_broker
+			is_externally_owned := True
+			create events.make (Max_events)
+
+			listen_fd := {VR_REACTOR_BRIDGE}.c_listen_tcp (default_pointer, a_port, Default_backlog)
+			check listen_ok: listen_fd >= 0 end
+
+			-- Generation 0 is reserved exclusively for the listening socket
+			res := {VR_REACTOR_BRIDGE}.c_reactor_add (handle, listen_fd, Reactor_in, 0)
+			check listen_registered: res = 0 end
+
+			last_tick_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+		ensure
+			is_open: is_open
+			is_listening: is_listening
+			broker_set: broker = a_broker
+		end
+
+feature -- Registration
+
+	register_worker (a_worker: separate VR_WORKER)
+			-- Register worker shard with reactor for event dispatch.
+		require
+			valid_worker: a_worker /= Void
+			capacity_available: registered_workers_count < worker_count
+		do
+			workers.extend (a_worker)
+		ensure
+			worker_added: registered_workers_count = old registered_workers_count + 1
+		end
+
 feature -- Access
+
+	registered_workers_count: INTEGER
+			-- Number of currently registered worker shards
+		do
+			Result := workers.count
+		end
 
 	native_handle: POINTER
 			-- Direct pointer to native vr_reactor_t (queried by VR_ENGINE for atomic shutdown)
@@ -82,6 +133,27 @@ feature -- Configuration
 				dispatch_set_protocol (workers.item (i), a_proto)
 				i := i + 1
 			end
+		end
+
+	replace_worker (a_index: INTEGER; a_worker: separate VR_WORKER)
+			-- Hot-swap worker slot `a_index` in reactor dispatch array.
+		require
+			valid_index: a_index >= 0 and a_index < worker_count
+			valid_worker: a_worker /= Void
+		do
+			workers.put (a_worker, a_index)
+		ensure
+			worker_replaced: workers.item (a_index) = a_worker
+		end
+
+	set_broker (a_broker: separate VR_BROKER)
+			-- Update shared broker reference upon supervisor broker restart.
+		require
+			valid_broker: a_broker /= Void
+		do
+			broker := a_broker
+		ensure
+			broker_set: broker = a_broker
 		end
 
 feature -- Status Report
@@ -147,8 +219,10 @@ feature -- Execution
 				end
 			end
 
-			-- Periodic worker idle sweep tick
+			-- Periodic worker idle sweep tick and reactor liveness heartbeat
 			now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
+			{VR_REACTOR_BRIDGE}.c_reactor_beat_reactor (handle, now_ms)
+
 			if now_ms >= last_tick_ms + Timer_tick_interval_ms.to_natural_64 then
 				last_tick_ms := now_ms
 				from
@@ -188,37 +262,39 @@ feature {NONE} -- Teardown & Barriers
 				listen_fd := -1
 			end
 
-			-- 2. Dispatch asynchronous shutdown to all workers
-			from
-				i := 0
-			until
-				i >= workers.count
-			loop
-				w := workers.item (i)
-				dispatch_shutdown (w)
-				i := i + 1
-			end
+			if not is_externally_owned then
+				-- 2. Dispatch asynchronous shutdown to all workers
+				from
+					i := 0
+				until
+					i >= workers.count
+				loop
+					w := workers.item (i)
+					dispatch_shutdown (w)
+					i := i + 1
+				end
 
-			-- 3. Synchronous wait-by-necessity barrier for each worker
-			from
-				i := 0
-			until
-				i >= workers.count
-			loop
-				w := workers.item (i)
-				completed := wait_worker_shutdown (w)
-				check worker_done: completed end
-				i := i + 1
-			end
+				-- 3. Synchronous wait-by-necessity barrier for each worker
+				from
+					i := 0
+				until
+					i >= workers.count
+				loop
+					w := workers.item (i)
+					completed := wait_worker_shutdown (w)
+					check worker_done: completed end
+					i := i + 1
+				end
 
-			-- 4. Workers drained; safely terminate pub/sub broker
-			dispatch_broker_shutdown (broker)
+				-- 4. Workers drained; safely terminate pub/sub broker
+				dispatch_broker_shutdown (broker)
 
-			-- 5. Destroy native reactor memory once all workers are confirmed idle
-			if handle /= default_pointer then
-				{VR_REACTOR_BRIDGE}.c_reactor_destroy (handle)
-				handle := default_pointer
+				-- 5. Destroy native reactor memory once all workers are confirmed idle
+				if handle /= default_pointer then
+					{VR_REACTOR_BRIDGE}.c_reactor_destroy (handle)
+				end
 			end
+			handle := default_pointer
 		ensure
 			cleaned_up: not is_open and not is_listening
 		end
@@ -314,10 +390,11 @@ feature {NONE} -- Implementation
 	broker: separate VR_BROKER
 	next_generation: NATURAL_32
 	last_tick_ms: NATURAL_64
+	is_externally_owned: BOOLEAN
 
 invariant
 	valid_listen_socket: listen_fd >= -1
 	valid_worker_count: worker_count > 0
-	workers_present: workers.count = worker_count
+	workers_present: workers.count <= worker_count
 
 end

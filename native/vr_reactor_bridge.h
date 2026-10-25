@@ -33,7 +33,10 @@ _Static_assert(sizeof(vr_reactor_event_t) == 12, "vr_reactor_event_t must be 12 
 
 typedef struct vr_reactor vr_reactor_t;
 
-/* Metrics Snapshot (120 bytes) */
+#define VR_MAX_WORKERS 64
+#define VR_MAX_TRACKED_FDS 65536
+
+/* Metrics Snapshot (Expanded to 136 bytes for Phase 7 supervision counters) */
 typedef struct {
     uint64_t active_connections;
     uint64_t accepts_total;
@@ -52,10 +55,13 @@ typedef struct {
     uint64_t sse_events_out_total;
     uint64_t sse_heartbeats_total;
     uint64_t sse_dropped_backpressure_total;
+    /* Phase 7 Supervision metrics */
+    uint64_t supervisor_restarts_total;
+    uint64_t supervisor_isolated_faults_total;
 } vr_reactor_metrics_t;
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(vr_reactor_metrics_t) == 120, "vr_reactor_metrics_t must be 120 bytes");
+_Static_assert(sizeof(vr_reactor_metrics_t) == 136, "vr_reactor_metrics_t must be 136 bytes");
 #endif
 
 /* Lifecycle */
@@ -156,6 +162,26 @@ vr_ws_msg_t *vr_sse_msg_create(
     const char *data,  size_t data_len,
     int initial_refs
 );
+
+/* Phase 7: Supervision Heartbeats, Fault Reporting, Shard FD Purge & Metrics */
+void     vr_reactor_beat_reactor(vr_reactor_t *r, uint64_t now_ms);
+void     vr_reactor_beat_broker (vr_reactor_t *r, uint64_t now_ms);
+void     vr_reactor_beat_worker (vr_reactor_t *r, int worker_id, uint64_t now_ms);
+
+uint64_t vr_reactor_get_reactor_beat(const vr_reactor_t *r);
+uint64_t vr_reactor_get_broker_beat (const vr_reactor_t *r);
+uint64_t vr_reactor_get_worker_beat (const vr_reactor_t *r, int worker_id);
+
+void     vr_reactor_report_broker_fault(vr_reactor_t *r);
+void     vr_reactor_report_worker_fault(vr_reactor_t *r, int worker_id);
+uint64_t vr_reactor_consume_fault_mask (vr_reactor_t *r);
+
+void     vr_reactor_set_fd_owner(vr_reactor_t *r, int fd, int16_t worker_id);
+int16_t  vr_reactor_get_fd_owner(const vr_reactor_t *r, int fd);
+int      vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id);
+
+void     vr_reactor_metric_inc_restarts(vr_reactor_t *r);
+void     vr_reactor_metric_inc_isolated_faults(vr_reactor_t *r);
 
 #ifdef __cplusplus
 }

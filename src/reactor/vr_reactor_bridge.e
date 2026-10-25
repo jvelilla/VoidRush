@@ -106,6 +106,16 @@ feature -- Poll & Wakeup
 			instance_free: class
 		end
 
+	c_reactor_wake (r: POINTER)
+			-- Wake up reactor thread (procedure wrapper discarding return code).
+		local
+			res: INTEGER
+		do
+			res := c_reactor_wakeup (r)
+		ensure
+			instance_free: class
+		end
+
 feature -- Socket Helpers
 
 	c_listen_tcp (host: POINTER; port, backlog: INTEGER): INTEGER
@@ -541,6 +551,148 @@ feature -- Phase 6 Server-Sent Events (SSE) Primitives
 			"C inline"
 		alias
 			"return (EIF_BOOLEAN) ($len >= 8 && ((const char *)$ptr)[0] == 'P' && ((const char *)$ptr)[1] == 'U' && ((const char *)$ptr)[2] == 'B' && ((const char *)$ptr)[3] == '_' && ((const char *)$ptr)[4] == 'S' && ((const char *)$ptr)[5] == 'S' && ((const char *)$ptr)[6] == 'E' && ((const char *)$ptr)[7] == ' ');"
+		ensure
+			instance_free: class
+		end
+
+feature -- Phase 7 Supervision Heartbeats, Faults & Shard Purge
+
+	c_reactor_beat_reactor (r: POINTER; now_ms: NATURAL_64)
+			-- Update atomic liveness timestamp for reactor.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_beat_reactor((vr_reactor_t *) $r, (uint64_t) $now_ms);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_beat_broker (r: POINTER; now_ms: NATURAL_64)
+			-- Update atomic liveness timestamp for broker.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_beat_broker((vr_reactor_t *) $r, (uint64_t) $now_ms);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_beat_worker (r: POINTER; worker_id: INTEGER; now_ms: NATURAL_64)
+			-- Update atomic liveness timestamp for worker shard.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_beat_worker((vr_reactor_t *) $r, (int) $worker_id, (uint64_t) $now_ms);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_get_reactor_beat (r: POINTER): NATURAL_64
+			-- Query latest atomic reactor heartbeat timestamp without locking.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_64) vr_reactor_get_reactor_beat((const vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_get_broker_beat (r: POINTER): NATURAL_64
+			-- Query latest atomic broker heartbeat timestamp without locking.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_64) vr_reactor_get_broker_beat((const vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_get_worker_beat (r: POINTER; worker_id: INTEGER): NATURAL_64
+			-- Query latest atomic worker heartbeat timestamp without locking.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_64) vr_reactor_get_worker_beat((const vr_reactor_t *) $r, (int) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_report_broker_fault (r: POINTER)
+			-- Atomically signal broker fault in bitmask.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_report_broker_fault((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_report_worker_fault (r: POINTER; worker_id: INTEGER)
+			-- Atomically signal worker fault in bitmask.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_report_worker_fault((vr_reactor_t *) $r, (int) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_consume_fault_mask (r: POINTER): NATURAL_64
+			-- Atomically exchange and clear child fault bitmask.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_64) vr_reactor_consume_fault_mask((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_set_fd_owner (r: POINTER; fd: INTEGER; worker_id: INTEGER_16)
+			-- Record shard worker ownership for `fd`.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_set_fd_owner((vr_reactor_t *) $r, (int) $fd, (int16_t) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_get_fd_owner (r: POINTER; fd: INTEGER): INTEGER_16
+			-- Query shard worker ownership for `fd`.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER_16) vr_reactor_get_fd_owner((const vr_reactor_t *) $r, (int) $fd);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_purge_worker_fds (r: POINTER; worker_id: INTEGER): INTEGER
+			-- Purge and close all sockets owned by `worker_id` from epoll.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_purge_worker_fds((vr_reactor_t *) $r, (int) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_restarts (r: POINTER)
+			-- Increment supervisor child restarts counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_restarts((vr_reactor_t *) $r);"
+		ensure
+			instance_free: class
+		end
+
+	c_metric_inc_isolated_faults (r: POINTER)
+			-- Increment connection isolated faults counter.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_metric_inc_isolated_faults((vr_reactor_t *) $r);"
 		ensure
 			instance_free: class
 		end
