@@ -41,6 +41,21 @@ feature -- Initialization
 			is_empty: is_empty
 		end
 
+feature -- Element Change
+
+	set (a_offset, a_length: INTEGER)
+			-- Mutate slice window in-place without reallocation.
+		require
+			valid_offset: a_offset >= 0
+			valid_length: a_length >= 0
+		do
+			offset := a_offset
+			length := a_length
+		ensure
+			offset_set: offset = a_offset
+			length_set: length = a_length
+		end
+
 feature -- Access
 
 	offset: INTEGER

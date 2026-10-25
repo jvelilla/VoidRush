@@ -697,4 +697,44 @@ feature -- Phase 7 Supervision Heartbeats, Faults & Shard Purge
 			instance_free: class
 		end
 
+	c_reactor_assign_worker (r: POINTER; fd: INTEGER; worker_count: INTEGER): INTEGER
+			-- Assign socket `fd` to the worker with the lowest active connection count.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_assign_worker((vr_reactor_t *) $r, (int) $fd, (int) $worker_count);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_route_fd (r: POINTER; fd: INTEGER; worker_count: INTEGER): INTEGER
+			-- Resolve worker partition owning `fd` for event dispatch, or -1 if unowned.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_route_fd((const vr_reactor_t *) $r, (int) $fd, (int) $worker_count);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_release_worker_conn (r: POINTER; worker_id: INTEGER)
+			-- Decrement the active connection count for `worker_id`.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_reactor_release_worker_conn((vr_reactor_t *) $r, (int) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_get_worker_conns (r: POINTER; worker_id: INTEGER): NATURAL_32
+			-- Active connection count tracked on worker shard `worker_id`.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_32) vr_reactor_get_worker_conns((const vr_reactor_t *) $r, (int) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
 end

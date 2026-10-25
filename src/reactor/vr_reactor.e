@@ -193,7 +193,7 @@ feature -- Execution
 		require
 			is_open: is_open
 		local
-			n, i, fd: INTEGER
+			n, i, fd, target_index: INTEGER
 			gen, flags: NATURAL_32
 			target_worker: separate VR_WORKER
 			now_ms: NATURAL_64
@@ -212,8 +212,13 @@ feature -- Execution
 					else
 						gen := events.item_generation (i)
 						flags := events.item_flags (i)
-						target_worker := workers.item (fd \\ worker_count)
-						dispatch_event (target_worker, fd, gen, flags)
+						target_index := {VR_REACTOR_BRIDGE}.c_reactor_route_fd (handle, fd, worker_count)
+						if target_index >= 0 and target_index < workers.count then
+							target_worker := workers.item (target_index)
+							dispatch_event (target_worker, fd, gen, flags)
+						else
+							{VR_REACTOR_BRIDGE}.c_metric_inc_stale (handle)
+						end
 					end
 					i := i + 1
 				end
@@ -354,7 +359,7 @@ feature {NONE} -- Implementation
 	accept_pending_connections
 			-- Accept up to Accept_budget_per_turn queued clients to prevent starvation.
 		local
-			client, res, count: INTEGER
+			client, res, count, target_index: INTEGER
 			done: BOOLEAN
 			target_worker: separate VR_WORKER
 		do
@@ -372,7 +377,8 @@ feature {NONE} -- Implementation
 						next_generation := 1 -- 0 is reserved for listen_fd
 					end
 					{VR_REACTOR_BRIDGE}.c_metric_inc_accept (handle)
-					target_worker := workers.item (client \\ worker_count)
+					target_index := {VR_REACTOR_BRIDGE}.c_reactor_assign_worker (handle, client, worker_count)
+					target_worker := workers.item (target_index)
 					dispatch_register (target_worker, client, next_generation)
 				else
 					done := True

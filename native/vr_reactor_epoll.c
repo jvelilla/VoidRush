@@ -46,6 +46,8 @@ struct vr_reactor {
     uint64_t worker_heartbeats_ms[VR_MAX_WORKERS];
     uint64_t child_fault_mask; /* Bit 63: Broker; Bits 0..62: Worker ID */
     int16_t  fd_owner[VR_MAX_TRACKED_FDS];
+    /* Performance Remediation: live connection count per worker (least-connections) */
+    uint32_t worker_conns[VR_MAX_WORKERS];
 
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
@@ -141,7 +143,7 @@ int vr_reactor_mod(vr_reactor_t *r, int fd, uint32_t flags, uint32_t generation)
 
 int vr_reactor_del(vr_reactor_t *r, int fd) {
     if (r && fd >= 0 && fd < VR_MAX_TRACKED_FDS) {
-        r->fd_owner[fd] = -1;
+        __atomic_store_n(&r->fd_owner[fd], (int16_t)-1, __ATOMIC_RELEASE);
     }
     return epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
 }
@@ -511,29 +513,79 @@ uint64_t vr_reactor_consume_fault_mask(vr_reactor_t *r) {
 /* Phase 7: Shard FD Ownership & Purge */
 void vr_reactor_set_fd_owner(vr_reactor_t *r, int fd, int16_t worker_id) {
     if (!r || fd < 0 || fd >= VR_MAX_TRACKED_FDS) return;
-    r->fd_owner[fd] = worker_id;
+    __atomic_store_n(&r->fd_owner[fd], worker_id, __ATOMIC_RELEASE);
 }
 
 int16_t vr_reactor_get_fd_owner(const vr_reactor_t *r, int fd) {
     if (!r || fd < 0 || fd >= VR_MAX_TRACKED_FDS) return -1;
-    return r->fd_owner[fd];
+    return __atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE);
 }
 
 int vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id) {
     if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return 0;
     int purged = 0;
     for (int fd = 0; fd < VR_MAX_TRACKED_FDS; fd++) {
-        if (r->fd_owner[fd] == (int16_t)worker_id) {
+        if (__atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE) == (int16_t)worker_id) {
             epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
             close(fd);
-            r->fd_owner[fd] = -1;
+            __atomic_store_n(&r->fd_owner[fd], (int16_t)-1, __ATOMIC_RELEASE);
             if (r->active_connections > 0) {
                 __atomic_sub_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
             }
             purged++;
         }
     }
+    /* Replacement worker starts with an empty shard */
+    __atomic_store_n(&r->worker_conns[worker_id], 0U, __ATOMIC_RELEASE);
     return purged;
+}
+
+/* Performance Remediation: Least-Connections Worker Assignment */
+int vr_reactor_assign_worker(vr_reactor_t *r, int fd, int worker_count) {
+    if (!r || worker_count <= 0) return 0;
+    if (worker_count > VR_MAX_WORKERS) worker_count = VR_MAX_WORKERS;
+
+    int best = 0;
+    uint32_t best_load = __atomic_load_n(&r->worker_conns[0], __ATOMIC_ACQUIRE);
+    for (int i = 1; i < worker_count; i++) {
+        uint32_t load = __atomic_load_n(&r->worker_conns[i], __ATOMIC_ACQUIRE);
+        if (load < best_load) {
+            best = i;
+            best_load = load;
+        }
+    }
+    __atomic_add_fetch(&r->worker_conns[best], 1U, __ATOMIC_ACQ_REL);
+    if (fd >= 0 && fd < VR_MAX_TRACKED_FDS) {
+        __atomic_store_n(&r->fd_owner[fd], (int16_t)best, __ATOMIC_RELEASE);
+    }
+    return best;
+}
+
+int vr_reactor_route_fd(const vr_reactor_t *r, int fd, int worker_count) {
+    if (!r || fd < 0 || worker_count <= 0) return -1;
+    if (fd >= VR_MAX_TRACKED_FDS) {
+        /* Untracked FD range: deterministic modulo fallback (matches assign path below) */
+        return fd % worker_count;
+    }
+    int16_t owner = __atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE);
+    if (owner < 0 || owner >= worker_count) return -1;
+    return (int)owner;
+}
+
+void vr_reactor_release_worker_conn(vr_reactor_t *r, int worker_id) {
+    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return;
+    uint32_t cur = __atomic_load_n(&r->worker_conns[worker_id], __ATOMIC_ACQUIRE);
+    while (cur > 0) {
+        if (__atomic_compare_exchange_n(&r->worker_conns[worker_id], &cur, cur - 1U,
+                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+    }
+}
+
+uint32_t vr_reactor_get_worker_conns(const vr_reactor_t *r, int worker_id) {
+    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return 0;
+    return __atomic_load_n(&r->worker_conns[worker_id], __ATOMIC_ACQUIRE);
 }
 
 /* Phase 7: Supervision Metrics Counters */

@@ -388,6 +388,41 @@ int main(void) {
     vr_reactor_del(sup_r, s3);
     close(s3);
 
+    /* Test least-connections worker assignment & routing */
+    assert(vr_reactor_get_worker_conns(sup_r, 0) == 0);
+    assert(vr_reactor_get_worker_conns(sup_r, 1) == 0);
+    assert(vr_reactor_get_worker_conns(sup_r, 2) == 0);
+
+    /* Assignment 1: worker 0 gets fd 100 */
+    int w_a = vr_reactor_assign_worker(sup_r, 100, 3);
+    assert(w_a == 0);
+    assert(vr_reactor_get_worker_conns(sup_r, 0) == 1);
+    assert(vr_reactor_route_fd(sup_r, 100, 3) == 0);
+
+    /* Assignment 2: worker 1 gets fd 101 */
+    int w_b = vr_reactor_assign_worker(sup_r, 101, 3);
+    assert(w_b == 1);
+    assert(vr_reactor_get_worker_conns(sup_r, 1) == 1);
+    assert(vr_reactor_route_fd(sup_r, 101, 3) == 1);
+
+    /* Assignment 3: worker 2 gets fd 102 */
+    int w_c = vr_reactor_assign_worker(sup_r, 102, 3);
+    assert(w_c == 2);
+    assert(vr_reactor_get_worker_conns(sup_r, 2) == 1);
+    assert(vr_reactor_route_fd(sup_r, 102, 3) == 2);
+
+    /* Assignment 4: tie broken by lowest index (worker 0) */
+    int w_d = vr_reactor_assign_worker(sup_r, 103, 3);
+    assert(w_d == 0);
+    assert(vr_reactor_get_worker_conns(sup_r, 0) == 2);
+
+    /* Release connection from worker 0 */
+    vr_reactor_release_worker_conn(sup_r, 0);
+    assert(vr_reactor_get_worker_conns(sup_r, 0) == 1);
+
+    /* Untracked FD routing */
+    assert(vr_reactor_route_fd(sup_r, VR_MAX_TRACKED_FDS + 7, 4) == (VR_MAX_TRACKED_FDS + 7) % 4);
+
     vr_reactor_destroy(sup_r);
 
     printf("[test_vr_reactor] All native VR reactor unit tests passed successfully!\n");

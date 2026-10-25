@@ -58,6 +58,7 @@ feature {NONE} -- Initialization
 			last_active_ms := a_now_ms
 			request_started_ms := 0
 			paused_in := False
+			armed_flags := 0
 
 			create in_buf.make (Scratch_buffer_size)
 			in_read_offset := 0
@@ -109,6 +110,10 @@ feature -- Access
 
 	paused_in: BOOLEAN
 			-- True when flow control has paused Reactor_in interest
+
+	armed_flags: NATURAL_32
+			-- Interest flags currently registered in kernel epoll state.
+			-- Reset to 0 whenever a one-shot readiness event is delivered (EPOLLONESHOT disarms the FD).
 
 	client_ip: STRING_8
 			-- IP address of remote peer (or extracted from PROXY v2 header)
@@ -256,6 +261,14 @@ feature -- Status Report
 			end
 		end
 
+	needs_rearm: BOOLEAN
+			-- Does the desired interest mask differ from what is armed in the kernel?
+		do
+			Result := interest_flags /= armed_flags
+		ensure
+			definition: Result = (interest_flags /= armed_flags)
+		end
+
 feature -- State Modifiers
 
 	set_proto_state (a_proto: INTEGER)
@@ -386,6 +399,14 @@ feature -- State Modifiers
 			paused_in := a_paused
 		ensure
 			paused_set: paused_in = a_paused
+		end
+
+	set_armed_flags (a_flags: NATURAL_32)
+			-- Record kernel epoll registration state.
+		do
+			armed_flags := a_flags
+		ensure
+			flags_set: armed_flags = a_flags
 		end
 
 	mark_closing

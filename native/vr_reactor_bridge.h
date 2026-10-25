@@ -183,6 +183,20 @@ int      vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id);
 void     vr_reactor_metric_inc_restarts(vr_reactor_t *r);
 void     vr_reactor_metric_inc_isolated_faults(vr_reactor_t *r);
 
+/* Performance Remediation: Least-Connections Worker Assignment
+ *  - assign_worker: picks the worker with the fewest live connections among
+ *    [0, worker_count), atomically increments its load, records fd ownership,
+ *    and returns the chosen worker index (lowest index wins ties).
+ *  - route_fd: returns the owning worker for `fd`; for untracked FDs
+ *    (fd >= VR_MAX_TRACKED_FDS) falls back to fd % worker_count; returns -1
+ *    if a tracked FD currently has no owner (stale event).
+ *  - release_worker_conn: saturating atomic decrement of a worker's load.
+ */
+int      vr_reactor_assign_worker(vr_reactor_t *r, int fd, int worker_count);
+int      vr_reactor_route_fd(const vr_reactor_t *r, int fd, int worker_count);
+void     vr_reactor_release_worker_conn(vr_reactor_t *r, int worker_id);
+uint32_t vr_reactor_get_worker_conns(const vr_reactor_t *r, int worker_id);
+
 #ifdef __cplusplus
 }
 #endif

@@ -183,10 +183,19 @@ feature {NONE} -- Tests
 			conn.mark_closed
 			check is_closed: conn.is_closed end
 			check not_matches_closed: not conn.matches (42) end
+
+			-- Armed flags hysteresis tracking test
+			create conn.make_with_proto (11, 100, now_ms, Proto_echo)
+			check initial_unarmed: conn.armed_flags = 0 end
+			check needs_initial_arm: conn.needs_rearm end
+			conn.set_armed_flags (Reactor_in)
+			check armed_matches: not conn.needs_rearm end
+			conn.append_echo (scratch.item, 4)
+			check needs_rearm_with_out: conn.needs_rearm end
 		end
 
 	test_http_slice
-			-- Verify VR_HTTP_SLICE string comparison, prefix, and integer parsing.
+			-- Verify VR_HTTP_SLICE string comparison, prefix, integer parsing, and in-place mutation.
 		local
 			buf: MANAGED_POINTER
 			s1, s2, s3: VR_HTTP_SLICE
@@ -202,6 +211,10 @@ feature {NONE} -- Tests
 			check s1_same: s1.same_as_string (buf, "GET") end
 			check s1_not_same: not s1.same_as_string (buf, "POST") end
 
+			-- Test in-place mutation without reallocating slice
+			s1.set (4, 8) -- "/healthz"
+			check s1_mutated: s1.same_as_string (buf, "/healthz") end
+
 			create s2.make (4, 8) -- "/healthz"
 			check s2_same: s2.same_as_string (buf, "/healthz") end
 			check s2_prefix: s2.starts_with (buf, "/health") end
@@ -211,7 +224,7 @@ feature {NONE} -- Tests
 		end
 
 	test_http_parser
-			-- Verify incremental parsing of request line and headers.
+			-- Verify incremental parsing of request line, headers, and watermark scanning.
 		local
 			parser: VR_HTTP_PARSER
 			buf: MANAGED_POINTER
@@ -225,18 +238,20 @@ feature {NONE} -- Tests
 				buf.put_character (req.item (ic), ic - 1)
 			end
 
+			-- Chunk 1: Incomplete headers (first 25 bytes), scan_watermark advances
+			ok := parser.try_parse_request_header (buf, 0, 25)
+			check incomplete_rejected: not ok end
+			check watermark_advanced: parser.scan_watermark = 25 end
+
+			-- Chunk 2: Full headers arrive; watermark allows incremental skip and clears on success
 			ok := parser.try_parse_request_header (buf, 0, req.count)
 			check parse_ok: ok end
+			check watermark_cleared: parser.scan_watermark = 0 end
 			check method_get: parser.method = Method_get end
 			check path_healthz: parser.path_slice.same_as_string (buf, "/healthz") end
 			check keep_alive: parser.is_keep_alive end
 			check host_set: parser.host_slice.same_as_string (buf, "localhost") end
 			check consumed_correct: parser.header_bytes_consumed = req.count end
-
-			-- Incomplete header check
-			parser.reset
-			ok := parser.try_parse_request_header (buf, 0, 20)
-			check incomplete_rejected: not ok end
 		end
 
 	test_proxy_v2

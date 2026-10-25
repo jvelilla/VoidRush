@@ -20,6 +20,8 @@ feature {NONE} -- Initialization
 			valid_handle: a_reactor_handle /= default_pointer
 			valid_broker: a_broker /= Void
 			valid_total: a_total_workers > 0
+		local
+			i: INTEGER
 		do
 			worker_id := a_id
 			reactor_handle := a_reactor_handle
@@ -28,7 +30,18 @@ feature {NONE} -- Initialization
 			create connections.make (1024)
 			create rooms.make (64)
 			create sse_rooms.make (64)
+			create sse_active_fds.make (64)
+			create expired_fds.make (64)
 			create scratch_buffer.make (Scratch_buffer_size)
+			create sse_heartbeat_buffer.make (Sse_heartbeat_comment.count)
+			from
+				i := 1
+			until
+				i > Sse_heartbeat_comment.count
+			loop
+				sse_heartbeat_buffer.put_character (Sse_heartbeat_comment.item (i), i - 1)
+				i := i + 1
+			end
 			current_fd := -1
 			is_shutdown_complete := False
 			protocol := Proto_http_reading_headers
@@ -57,11 +70,14 @@ feature -- Access
 	total_workers: INTEGER
 			-- Total number of worker shards in reactor pool
 
-	rooms: HASH_TABLE [ARRAYED_LIST [INTEGER], INTEGER]
-			-- Worker-local subscription directory: room_id -> list of local client FDs
+	rooms: HASH_TABLE [HASH_TABLE [BOOLEAN, INTEGER], INTEGER]
+			-- Worker-local subscription directory: room_id -> (client FD -> True)
 
-	sse_rooms: HASH_TABLE [ARRAYED_LIST [INTEGER], INTEGER]
-			-- Worker-local SSE subscription directory: room_id -> list of local client FDs
+	sse_rooms: HASH_TABLE [HASH_TABLE [BOOLEAN, INTEGER], INTEGER]
+			-- Worker-local SSE subscription directory: room_id -> (client FD -> True)
+
+	sse_active_fds: HASH_TABLE [BOOLEAN, INTEGER]
+			-- Fast index of active SSE connections on this worker shard for O(sse) heartbeat ticks
 
 	is_shutdown_complete: BOOLEAN
 			-- Has worker cleanly closed all connections during shutdown?
@@ -129,7 +145,9 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 
 			-- Worker-exclusive registration to epoll
 			res := {VR_REACTOR_BRIDGE}.c_reactor_add (reactor_handle, a_fd, Reactor_in, a_generation)
-			if res /= 0 then
+			if res = 0 then
+				conn.set_armed_flags (Reactor_in)
+			else
 				close_connection (a_fd)
 			end
 		ensure
@@ -142,7 +160,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 			valid_fd: a_fd >= 0
 		local
 			now_ms: NATURAL_64
-			read_turn, write_turn, chunk, n, res: INTEGER
+			read_turn, write_turn, chunk, n: INTEGER
 			read_done, write_done: BOOLEAN
 		do
 			current_fd := a_fd
@@ -151,6 +169,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 				check test_isolated_fault: False end
 			end
 			if attached connections.item (a_fd) as conn and then conn.matches (a_generation) then
+				conn.set_armed_flags (0)
 				now_ms := {VR_REACTOR_BRIDGE}.c_reactor_now_ms
 
 				-- Step 2: Fatal error check (immediate abort)
@@ -228,12 +247,7 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 						if conn.state = State_closing and conn.out_buf_bytes = 0 then
 							close_connection (a_fd)
 						else
-							if conn.interest_flags /= 0 then
-								res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_fd, conn.interest_flags, a_generation)
-								if res /= 0 then
-									close_connection (a_fd)
-								end
-							end
+							sync_interest (conn)
 						end
 					end
 				end
@@ -263,30 +277,33 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 		require
 			valid_time: a_now_ms > 0
 		local
-			expired_fds: ARRAYED_LIST [INTEGER]
-			hb_ptr: POINTER
-			c_hb: ANY
+			target_fd: INTEGER
 		do
 			if reactor_handle /= default_pointer then
 				{VR_REACTOR_BRIDGE}.c_reactor_beat_worker (reactor_handle, worker_id, a_now_ms)
 			end
 
-			create expired_fds.make (64)
-			c_hb := Sse_heartbeat_comment.to_c
-			hb_ptr := $c_hb
-
+			-- Fast SSE Heartbeat Sweep over dedicated SSE index (Phase C)
 			across
-				connections as ic
+				sse_active_fds as sse_ic
 			loop
-				if ic.proto_state = Proto_sse_open then
+				target_fd := @sse_ic.key
+				if attached connections.item (target_fd) as ic and then ic.proto_state = Proto_sse_open then
 					if a_now_ms - ic.last_sse_heartbeat_ms >= Sse_heartbeat_interval_ms then
-						deliver_frame_to_connection (ic, hb_ptr, Sse_heartbeat_comment.count)
+						deliver_frame_to_connection (ic, sse_heartbeat_buffer.item, Sse_heartbeat_comment.count)
 						ic.set_last_sse_heartbeat_ms (a_now_ms)
 						if reactor_handle /= default_pointer then
 							{VR_REACTOR_BRIDGE}.c_metric_inc_sse_heartbeats (reactor_handle)
 						end
 					end
 				end
+			end
+
+			-- General Inactivity and Slowloris Sweep using pre-allocated list (Phase A)
+			expired_fds.wipe_out
+			across
+				connections as ic
+			loop
 				if ic.is_expired (a_now_ms) then
 					expired_fds.extend (@ic.key)
 				end
@@ -334,18 +351,20 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
 		local
-			list: ARRAYED_LIST [INTEGER]
+			set: HASH_TABLE [BOOLEAN, INTEGER]
 		do
 			if not rooms.has (a_room_id) then
-				create list.make (64)
-				rooms.put (list, a_room_id)
+				create set.make (64)
+				rooms.put (set, a_room_id)
 			end
-			if attached rooms.item (a_room_id) as l and then not l.has (a_fd) then
-				l.extend (a_fd)
+			if attached rooms.item (a_room_id) as s then
+				s.force (True, a_fd)
 				if attached connections.item (a_fd) as conn then
 					conn.register_room (a_room_id)
 				end
 			end
+		ensure
+			room_has_fd: attached rooms.item (a_room_id) as s and then s.has (a_fd)
 		end
 
 	leave_room (a_fd, a_room_id: INTEGER)
@@ -354,8 +373,11 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
 		do
-			if attached rooms.item (a_room_id) as l then
-				l.prune_all (a_fd)
+			if attached rooms.item (a_room_id) as s then
+				s.remove (a_fd)
+				if s.is_empty then
+					rooms.remove (a_room_id)
+				end
 			end
 			if attached connections.item (a_fd) as conn then
 				conn.unregister_room (a_room_id)
@@ -383,22 +405,19 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_msg: a_msg_handle /= default_pointer
 		local
 			data_ptr: POINTER
-			total_len, i, target_fd: INTEGER
+			total_len, target_fd: INTEGER
 		do
 			if attached rooms.item (a_room_id) as subscriber_list then
 				data_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_data (a_msg_handle)
 				total_len := {VR_REACTOR_BRIDGE}.c_ws_msg_size (a_msg_handle)
 
-				from
-					i := 1
-				until
-					i > subscriber_list.count
+				across
+					subscriber_list as sub_ic
 				loop
-					target_fd := subscriber_list.i_th (i)
+					target_fd := @sub_ic.key
 					if attached connections.item (target_fd) as conn and then conn.proto_state = Proto_ws_open then
 						deliver_frame_to_connection (conn, data_ptr, total_len)
 					end
-					i := i + 1
 				end
 			end
 			-- Decrement reference count; last worker automatically frees C memory
@@ -418,7 +437,7 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_ptr: a_ptr /= default_pointer
 			valid_len: a_len > 0
 		local
-			n, res: INTEGER
+			n: INTEGER
 			now_ms: NATURAL_64
 		do
 			if a_conn.paused_in then
@@ -443,10 +462,10 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 					a_conn.append_outbound (a_ptr + n, a_len - n)
 					a_conn.touch (now_ms)
 					{VR_REACTOR_BRIDGE}.c_metric_add_bytes_out (reactor_handle, n.to_natural_64)
-					res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+					sync_interest (a_conn)
 				elseif n = Reactor_io_would_block then
 					a_conn.append_outbound (a_ptr, a_len)
-					res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+					sync_interest (a_conn)
 				else -- Reactor_io_error (-2)
 					close_connection (a_conn.fd)
 				end
@@ -455,7 +474,7 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 				if a_conn.out_buf_bytes >= Out_buf_high_water then
 					a_conn.set_paused_in (True)
 				end
-				res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+				sync_interest (a_conn)
 			end
 		end
 
@@ -465,20 +484,21 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
 		local
-			list: ARRAYED_LIST [INTEGER]
+			set: HASH_TABLE [BOOLEAN, INTEGER]
 		do
+			sse_active_fds.force (True, a_fd)
 			if not sse_rooms.has (a_room_id) then
-				create list.make (64)
-				sse_rooms.put (list, a_room_id)
+				create set.make (64)
+				sse_rooms.put (set, a_room_id)
 			end
-			if attached sse_rooms.item (a_room_id) as l and then not l.has (a_fd) then
-				l.extend (a_fd)
+			if attached sse_rooms.item (a_room_id) as s then
+				s.force (True, a_fd)
 				if attached connections.item (a_fd) as conn then
 					conn.register_room (a_room_id)
 				end
 			end
 		ensure
-			room_has_fd: attached sse_rooms.item (a_room_id) as l and then l.has (a_fd)
+			room_has_fd: attached sse_rooms.item (a_room_id) as s and then s.has (a_fd)
 		end
 
 	leave_sse_room (a_fd, a_room_id: INTEGER)
@@ -487,8 +507,11 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
 		do
-			if attached sse_rooms.item (a_room_id) as l then
-				l.prune_all (a_fd)
+			if attached sse_rooms.item (a_room_id) as s then
+				s.remove (a_fd)
+				if s.is_empty then
+					sse_rooms.remove (a_room_id)
+				end
 			end
 			if attached connections.item (a_fd) as conn then
 				conn.unregister_room (a_room_id)
@@ -538,22 +561,19 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_msg: a_msg_handle /= default_pointer
 		local
 			data_ptr: POINTER
-			total_len, i, target_fd: INTEGER
+			total_len, target_fd: INTEGER
 		do
 			if attached sse_rooms.item (a_room_id) as subscriber_list then
 				data_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_data (a_msg_handle)
 				total_len := {VR_REACTOR_BRIDGE}.c_ws_msg_size (a_msg_handle)
 
-				from
-					i := 1
-				until
-					i > subscriber_list.count
+				across
+					subscriber_list as sub_ic
 				loop
-					target_fd := subscriber_list.i_th (i)
+					target_fd := @sub_ic.key
 					if attached connections.item (target_fd) as conn and then conn.proto_state = Proto_sse_open then
 						deliver_frame_to_connection (conn, data_ptr, total_len)
 					end
-					i := i + 1
 				end
 			end
 			-- Decrement reference count; last worker frees memory atomically
@@ -563,6 +583,27 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			if reactor_handle /= default_pointer then
 				{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, worker_id)
 				{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+			end
+		end
+
+feature {NONE} -- Epoll Interest Hysteresis
+
+	sync_interest (a_conn: VR_CONNECTION)
+			-- Synchronize epoll interest with connection interest_flags if transitioned.
+		require
+			valid_conn: a_conn /= Void
+		local
+			res: INTEGER
+		do
+			if a_conn.interest_flags /= a_conn.armed_flags then
+				if a_conn.interest_flags /= 0 then
+					res := {VR_REACTOR_BRIDGE}.c_reactor_mod (reactor_handle, a_conn.fd, a_conn.interest_flags, a_conn.generation)
+					if res = 0 then
+						a_conn.set_armed_flags (a_conn.interest_flags)
+					else
+						close_connection (a_conn.fd)
+					end
+				end
 			end
 		end
 
@@ -588,6 +629,12 @@ feature {NONE} -- Implementation
 	scratch_buffer: MANAGED_POINTER
 			-- Dedicated worker scratch memory for non-blocking reads
 
+	expired_fds: ARRAYED_LIST [INTEGER]
+			-- Pre-allocated buffer for idle sweep (zero GC allocation)
+
+	sse_heartbeat_buffer: MANAGED_POINTER
+			-- Pre-encoded native buffer containing Sse_heartbeat_comment
+
 	close_connection (a_fd: INTEGER)
 			-- Remove from tracking, deregister from epoll, and close file descriptor.
 		require
@@ -598,15 +645,23 @@ feature {NONE} -- Implementation
 			if attached connections.item (a_fd) as conn then
 				-- Remove from all worker-local rooms immediately (Zero ghost deliveries!)
 				across conn.rooms as r_ic loop
-					if attached rooms.item (r_ic) as l then
-						l.prune_all (a_fd)
+					if attached rooms.item (r_ic) as set then
+						set.remove (a_fd)
+						if set.is_empty then
+							rooms.remove (r_ic)
+						end
 					end
-					if attached sse_rooms.item (r_ic) as sl then
-						sl.prune_all (a_fd)
+					if attached sse_rooms.item (r_ic) as sse_set then
+						sse_set.remove (a_fd)
+						if sse_set.is_empty then
+							sse_rooms.remove (r_ic)
+						end
 					end
 				end
+				sse_active_fds.remove (a_fd)
 				conn.mark_closed
 				connections.remove (a_fd)
+				{VR_REACTOR_BRIDGE}.c_reactor_release_worker_conn (reactor_handle, worker_id)
 				{VR_REACTOR_BRIDGE}.c_reactor_set_fd_owner (reactor_handle, a_fd, -1)
 				res := {VR_REACTOR_BRIDGE}.c_reactor_del (reactor_handle, a_fd)
 				res := {VR_REACTOR_BRIDGE}.c_close (a_fd)

@@ -24,9 +24,11 @@ feature {NONE} -- Initialization
 			create ws_key_slice.make_empty
 			create accept_slice.make_empty
 			create last_event_id_slice.make_empty
+			create scratch_val_slice.make_empty
 			reset
 		ensure
 			reset_done: method = Method_unknown and header_bytes_consumed = 0
+			watermark_cleared: scan_watermark = 0
 		end
 
 feature -- Access
@@ -134,9 +136,11 @@ feature -- State Management
 			is_keep_alive := True
 			content_length := 0
 			header_bytes_consumed := 0
+			scan_watermark := 0
 		ensure
 			method_cleared: method = Method_unknown
 			consumed_cleared: header_bytes_consumed = 0
+			watermark_cleared: scan_watermark = 0
 		end
 
 feature -- Parsing
@@ -144,14 +148,18 @@ feature -- Parsing
 	try_parse_request_header (buf: MANAGED_POINTER; start_offset, end_offset: INTEGER): BOOLEAN
 			-- Attempt to scan and parse complete HTTP/1.1 headers between `start_offset` and `end_offset`.
 			-- Returns True if complete headers ending in \r\n\r\n (or \n\n) were found and parsed.
+			-- Bytes already scanned by a previous unsuccessful call for the same request are skipped
+			-- (minus a 3-byte overlap for delimiters straddling the old boundary).
 		require
 			valid_buf: buf /= Void
 			valid_range: start_offset >= 0 and end_offset <= buf.count and start_offset <= end_offset
 		local
-			header_end, req_line_end: INTEGER
+			header_end, req_line_end, scan_from: INTEGER
 		do
-			header_end := find_crlf_crlf (buf, start_offset, end_offset)
+			scan_from := (start_offset + scan_watermark - Delimiter_overlap).max (start_offset).min (end_offset)
+			header_end := find_crlf_crlf (buf, scan_from, end_offset)
 			if header_end > 0 then
+				scan_watermark := 0
 				header_bytes_consumed := header_end - start_offset
 				req_line_end := find_line_end (buf, start_offset, header_end)
 				if req_line_end > start_offset then
@@ -162,11 +170,21 @@ feature -- Parsing
 					Result := False
 				end
 			else
+				scan_watermark := end_offset - start_offset
 				Result := False
 			end
+		ensure
+			watermark_cleared_on_success: Result implies scan_watermark = 0
+			watermark_consistent: scan_watermark = 0 or scan_watermark = end_offset - start_offset
 		end
 
+	scan_watermark: INTEGER
+			-- Number of bytes (relative to the request start) already scanned for the header terminator
+
 feature {NONE} -- Delimiter Scanners
+
+	Delimiter_overlap: INTEGER = 3
+			-- Bytes re-scanned behind the watermark so a CRLFCRLF split across reads is detected
 
 	find_crlf_crlf (buf: MANAGED_POINTER; start_pos, end_pos: INTEGER): INTEGER
 			-- Offset immediately following \r\n\r\n or \n\n, or 0 if not found
@@ -258,7 +276,7 @@ feature {NONE} -- Token Extraction
 			   buf.read_character (start_pos + 2) = 'T' and then
 			   buf.read_character (start_pos + 3) = ' ' then
 				method := Method_get
-				create method_slice.make (start_pos, 3)
+				method_slice.set (start_pos, 3)
 				sp1 := start_pos + 3
 			elseif line_end - start_pos >= 5 and then
 			       buf.read_character (start_pos) = 'P' and then
@@ -267,7 +285,7 @@ feature {NONE} -- Token Extraction
 			       buf.read_character (start_pos + 3) = 'T' and then
 			       buf.read_character (start_pos + 4) = ' ' then
 				method := Method_post
-				create method_slice.make (start_pos, 4)
+				method_slice.set (start_pos, 4)
 				sp1 := start_pos + 4
 			elseif line_end - start_pos >= 5 and then
 			       buf.read_character (start_pos) = 'H' and then
@@ -276,12 +294,12 @@ feature {NONE} -- Token Extraction
 			       buf.read_character (start_pos + 3) = 'D' and then
 			       buf.read_character (start_pos + 4) = ' ' then
 				method := Method_head
-				create method_slice.make (start_pos, 4)
+				method_slice.set (start_pos, 4)
 				sp1 := start_pos + 4
 			else
 				sp1 := find_char (buf, ' ', start_pos, line_end)
 				if sp1 > start_pos then
-					create method_slice.make (start_pos, sp1 - start_pos)
+					method_slice.set (start_pos, sp1 - start_pos)
 					method := Method_unknown
 				end
 			end
@@ -293,11 +311,11 @@ feature {NONE} -- Token Extraction
 					uri_len := sp2 - sp1 - 1
 					qmark := find_char (buf, '?', sp1 + 1, sp2)
 					if qmark > 0 then
-						create path_slice.make (sp1 + 1, qmark - (sp1 + 1))
-						create query_slice.make (qmark + 1, sp2 - (qmark + 1))
+						path_slice.set (sp1 + 1, qmark - (sp1 + 1))
+						query_slice.set (qmark + 1, sp2 - (qmark + 1))
 					else
-						create path_slice.make (sp1 + 1, uri_len)
-						create query_slice.make_empty
+						path_slice.set (sp1 + 1, uri_len)
+						query_slice.reset
 					end
 
 					-- Parse HTTP version: inspect character at sp2 + 8 (e.g. "HTTP/1.1")
@@ -370,12 +388,15 @@ feature {NONE} -- Token Extraction
 		end
 
 	match_header (buf: MANAGED_POINTER; name_offset, colon_offset, val_offset, val_len: INTEGER)
+			-- Classify header at `name_offset` and record its value window.
+			-- Retained values are copied by offset/length (never by reference) into their dedicated slices.
 		local
 			name_len: INTEGER
 			v_slice: VR_HTTP_SLICE
 		do
 			name_len := colon_offset - name_offset
-			create v_slice.make (val_offset, val_len)
+			v_slice := scratch_val_slice
+			v_slice.set (val_offset, val_len)
 
 			-- Check "content-length" (14 chars)
 			if name_len = 14 and then
@@ -405,7 +426,7 @@ feature {NONE} -- Token Extraction
 			elseif name_len = 17 and then
 			       (buf.read_character (name_offset) = 'S' or buf.read_character (name_offset) = 's') and then
 			       (buf.read_character (name_offset + 14) = 'K' or buf.read_character (name_offset + 14) = 'k') then
-				ws_key_slice := v_slice
+				ws_key_slice.set (val_offset, val_len)
 			-- Check "sec-websocket-version" (21 chars)
 			elseif name_len = 21 and then
 			       (buf.read_character (name_offset) = 'S' or buf.read_character (name_offset) = 's') and then
@@ -414,33 +435,37 @@ feature {NONE} -- Token Extraction
 			-- Check "host" (4 chars)
 			elseif name_len = 4 and then
 			       (buf.read_character (name_offset) = 'H' or buf.read_character (name_offset) = 'h') then
-				host_slice := v_slice
+				host_slice.set (val_offset, val_len)
 			-- Check "x-forwarded-for" (15 chars)
 			elseif name_len = 15 and then
 			       (buf.read_character (name_offset) = 'X' or buf.read_character (name_offset) = 'x') and then
 			       (buf.read_character (name_offset + 12) = 'F' or buf.read_character (name_offset + 12) = 'f') then
-				x_forwarded_for_slice := v_slice
+				x_forwarded_for_slice.set (val_offset, val_len)
 			-- Check "x-forwarded-proto" (17 chars)
 			elseif name_len = 17 and then
 			       (buf.read_character (name_offset) = 'X' or buf.read_character (name_offset) = 'x') and then
 			       (buf.read_character (name_offset + 12) = 'P' or buf.read_character (name_offset + 12) = 'p') then
-				x_forwarded_proto_slice := v_slice
+				x_forwarded_proto_slice.set (val_offset, val_len)
 			-- Check "accept" (6 chars)
 			elseif name_len = 6 and then
 			       (buf.read_character (name_offset) = 'A' or buf.read_character (name_offset) = 'a') and then
 			       (buf.read_character (name_offset + 1) = 'C' or buf.read_character (name_offset + 1) = 'c') then
-				accept_slice := v_slice
+				accept_slice.set (val_offset, val_len)
 			-- Check "last-event-id" (13 chars)
 			elseif name_len = 13 and then
 			       (buf.read_character (name_offset) = 'L' or buf.read_character (name_offset) = 'l') and then
 			       (buf.read_character (name_offset + 5) = 'E' or buf.read_character (name_offset + 5) = 'e') then
-				last_event_id_slice := v_slice
+				last_event_id_slice.set (val_offset, val_len)
 			end
 		end
+
+	scratch_val_slice: VR_HTTP_SLICE
+			-- Reusable header-value window used for transient comparisons (never retained)
 
 invariant
 	valid_method: method >= Method_unknown and method <= Method_options
 	valid_consumed: header_bytes_consumed >= 0
 	valid_content_length: content_length >= 0
+	valid_watermark: scan_watermark >= 0
 
 end
