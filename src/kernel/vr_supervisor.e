@@ -187,6 +187,7 @@ feature -- Lifecycle Coordination
 				dispatch_reactor_step (r, a_timeout_ms)
 			end
 			check_health ({VR_REACTOR_BRIDGE}.c_reactor_now_ms)
+			{VR_REACTOR_BRIDGE}.c_sleep_ms (a_timeout_ms)
 		end
 
 	run_loop
@@ -358,8 +359,8 @@ feature {NONE} -- Recovery Actions
 					-- 3. Hot-swap in broker & reactor
 					dispatch_replace_broker_worker (b, a_index, new_w)
 					if attached reactor as r then
-						dispatch_replace_reactor_worker (r, a_index, new_w)
 						{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
+						dispatch_replace_reactor_worker (r, a_index, new_w)
 					end
 
 					if attached child_specs.item ("worker_" + a_index.out) as s then
