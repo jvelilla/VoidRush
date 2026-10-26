@@ -109,6 +109,16 @@ feature -- Configuration
 			valid_broker: a_broker /= Void
 		do
 			broker := a_broker
+			across rooms as r_ic loop
+				if not r_ic.is_empty then
+					dispatch_broker_update_ws_room (broker, @r_ic.key, worker_id, True)
+				end
+			end
+			across sse_rooms as sse_ic loop
+				if not sse_ic.is_empty then
+					dispatch_broker_update_sse_room (broker, @sse_ic.key, worker_id, True)
+				end
+			end
 		ensure
 			broker_set: broker = a_broker
 		end
@@ -184,12 +194,13 @@ feature -- Asynchronous Commands (Invoked from VR_REACTOR)
 						until
 							read_done or read_turn >= Read_budget_per_turn
 						loop
-							chunk := (Read_budget_per_turn - read_turn).min (scratch_buffer.count)
-							n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_fd, scratch_buffer.item, chunk)
+							chunk := (Read_budget_per_turn - read_turn).min (Scratch_buffer_size)
+							conn.ensure_inbound_capacity (chunk)
+							n := {VR_REACTOR_BRIDGE}.c_reactor_read (a_fd, conn.in_write_pointer, chunk)
 							if n > 0 then
 								read_turn := read_turn + n
 								{VR_REACTOR_BRIDGE}.c_metric_add_bytes_in (reactor_handle, n.to_natural_64)
-								conn.on_data_received (scratch_buffer.item, n, now_ms)
+								conn.advance_in_write (n, now_ms)
 								if conn.out_buf_bytes >= Out_buf_high_water then
 									conn.set_paused_in (True)
 									read_done := True
@@ -352,16 +363,24 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_room: a_room_id >= 0
 		local
 			set: HASH_TABLE [BOOLEAN, INTEGER]
+			was_first: BOOLEAN
 		do
 			if not rooms.has (a_room_id) then
 				create set.make (64)
 				rooms.put (set, a_room_id)
+				was_first := True
 			end
 			if attached rooms.item (a_room_id) as s then
+				if s.is_empty then
+					was_first := True
+				end
 				s.force (True, a_fd)
 				if attached connections.item (a_fd) as conn then
 					conn.register_room (a_room_id)
 				end
+			end
+			if was_first then
+				dispatch_broker_update_ws_room (broker, a_room_id, worker_id, True)
 			end
 		ensure
 			room_has_fd: attached rooms.item (a_room_id) as s and then s.has (a_fd)
@@ -372,15 +391,21 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 		require
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
+		local
+			became_empty: BOOLEAN
 		do
 			if attached rooms.item (a_room_id) as s then
 				s.remove (a_fd)
 				if s.is_empty then
 					rooms.remove (a_room_id)
+					became_empty := True
 				end
 			end
 			if attached connections.item (a_fd) as conn then
 				conn.unregister_room (a_room_id)
+			end
+			if became_empty then
+				dispatch_broker_update_ws_room (broker, a_room_id, worker_id, False)
 			end
 		end
 
@@ -485,17 +510,25 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_room: a_room_id >= 0
 		local
 			set: HASH_TABLE [BOOLEAN, INTEGER]
+			was_first: BOOLEAN
 		do
 			sse_active_fds.force (True, a_fd)
 			if not sse_rooms.has (a_room_id) then
 				create set.make (64)
 				sse_rooms.put (set, a_room_id)
+				was_first := True
 			end
 			if attached sse_rooms.item (a_room_id) as s then
+				if s.is_empty then
+					was_first := True
+				end
 				s.force (True, a_fd)
 				if attached connections.item (a_fd) as conn then
 					conn.register_room (a_room_id)
 				end
+			end
+			if was_first then
+				dispatch_broker_update_sse_room (broker, a_room_id, worker_id, True)
 			end
 		ensure
 			room_has_fd: attached sse_rooms.item (a_room_id) as s and then s.has (a_fd)
@@ -506,15 +539,21 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 		require
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
+		local
+			became_empty: BOOLEAN
 		do
 			if attached sse_rooms.item (a_room_id) as s then
 				s.remove (a_fd)
 				if s.is_empty then
 					sse_rooms.remove (a_room_id)
+					became_empty := True
 				end
 			end
 			if attached connections.item (a_fd) as conn then
 				conn.unregister_room (a_room_id)
+			end
+			if became_empty then
+				dispatch_broker_update_sse_room (broker, a_room_id, worker_id, False)
 			end
 		end
 
@@ -621,6 +660,18 @@ feature {NONE} -- SCOOP Broker Dispatch
 			a_broker.publish_sse (a_room_id, a_msg_ptr)
 		end
 
+	dispatch_broker_update_ws_room (a_broker: separate VR_BROKER; a_room_id, a_worker_id: INTEGER; a_has: BOOLEAN)
+			-- Asynchronous command to separate broker.
+		do
+			a_broker.update_ws_room_worker (a_room_id, a_worker_id, a_has)
+		end
+
+	dispatch_broker_update_sse_room (a_broker: separate VR_BROKER; a_room_id, a_worker_id: INTEGER; a_has: BOOLEAN)
+			-- Asynchronous command to separate broker.
+		do
+			a_broker.update_sse_room_worker (a_room_id, a_worker_id, a_has)
+		end
+
 feature {NONE} -- Implementation
 
 	connections: HASH_TABLE [VR_CONNECTION, INTEGER]
@@ -649,12 +700,14 @@ feature {NONE} -- Implementation
 						set.remove (a_fd)
 						if set.is_empty then
 							rooms.remove (r_ic)
+							dispatch_broker_update_ws_room (broker, r_ic, worker_id, False)
 						end
 					end
 					if attached sse_rooms.item (r_ic) as sse_set then
 						sse_set.remove (a_fd)
 						if sse_set.is_empty then
 							sse_rooms.remove (r_ic)
+							dispatch_broker_update_sse_room (broker, r_ic, worker_id, False)
 						end
 					end
 				end

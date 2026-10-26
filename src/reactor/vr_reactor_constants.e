@@ -45,11 +45,11 @@ feature -- Connection States
 
 feature -- Fairness Budgets & Flow Control
 
-	Read_budget_per_turn: INTEGER = 65536
-			-- 64 KiB maximum read allowance per on_socket_event turn
+	Read_budget_per_turn: INTEGER = 32768
+			-- 32 KiB maximum read allowance per on_socket_event turn to prevent HoL monopolization
 
-	Write_budget_per_turn: INTEGER = 65536
-			-- 64 KiB maximum write allowance per on_socket_event turn
+	Write_budget_per_turn: INTEGER = 32768
+			-- 32 KiB maximum write allowance per on_socket_event turn to prevent HoL monopolization
 
 	Out_buf_high_water: INTEGER = 1048576
 			-- 1 MiB threshold: pause Reactor_in interest
@@ -147,7 +147,7 @@ feature -- Buffer and Pool Configuration
 	Event_size: INTEGER = 12
 			-- Size in bytes of one native vr_reactor_event_t struct (fd: 4 + gen: 4 + flags: 4)
 
-	Max_events: INTEGER = 1024
+	Max_events: INTEGER = 2048
 			-- Maximum number of events returned in one vr_reactor_wait call
 
 	Default_worker_count: INTEGER = 4

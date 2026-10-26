@@ -14,7 +14,7 @@
 #include <errno.h>
 #include <time.h>
 
-#define VR_MAX_INTERNAL_EVENTS 1024
+#define VR_MAX_INTERNAL_EVENTS 2048
 
 struct vr_reactor {
     int epfd;

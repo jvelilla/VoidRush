@@ -16,6 +16,8 @@ feature {NONE} -- Initialization
 			-- Initialize broker with empty worker list.
 		do
 			create workers.make_empty (Default_worker_count)
+			create ws_room_worker_mask.make (64)
+			create sse_room_worker_mask.make (64)
 			is_shutdown := False
 		ensure
 			empty_workers: workers.count = 0
@@ -43,6 +45,7 @@ feature -- Configuration
 			not_shutdown: not is_shutdown
 		do
 			workers.put (a_worker, a_index)
+			clear_worker_subscriptions (a_index)
 		ensure
 			worker_replaced: workers.item (a_index) = a_worker
 		end
@@ -88,23 +91,124 @@ feature -- Supervision Commands
 			end
 		end
 
+feature -- Room Membership Management (Invoked from Workers)
+
+	update_ws_room_worker (a_room_id: INTEGER; a_worker_id: INTEGER; a_has_subscribers: BOOLEAN)
+			-- Update presence bitmask for worker `a_worker_id` in WebSocket room `a_room_id`.
+		require
+			valid_room: a_room_id >= 0
+			valid_worker: a_worker_id >= 0 and a_worker_id < 64
+		local
+			mask, bit_mask: NATURAL_64
+		do
+			bit_mask := (1).to_natural_64 |<< a_worker_id
+			if ws_room_worker_mask.has (a_room_id) then
+				mask := ws_room_worker_mask.item (a_room_id)
+			else
+				mask := 0
+			end
+			if a_has_subscribers then
+				mask := mask | bit_mask
+				ws_room_worker_mask.force (mask, a_room_id)
+			else
+				mask := mask & bit_mask.bit_not
+				if mask = 0 then
+					ws_room_worker_mask.remove (a_room_id)
+				else
+					ws_room_worker_mask.force (mask, a_room_id)
+				end
+			end
+		end
+
+	update_sse_room_worker (a_room_id: INTEGER; a_worker_id: INTEGER; a_has_subscribers: BOOLEAN)
+			-- Update presence bitmask for worker `a_worker_id` in SSE room `a_room_id`.
+		require
+			valid_room: a_room_id >= 0
+			valid_worker: a_worker_id >= 0 and a_worker_id < 64
+		local
+			mask, bit_mask: NATURAL_64
+		do
+			bit_mask := (1).to_natural_64 |<< a_worker_id
+			if sse_room_worker_mask.has (a_room_id) then
+				mask := sse_room_worker_mask.item (a_room_id)
+			else
+				mask := 0
+			end
+			if a_has_subscribers then
+				mask := mask | bit_mask
+				sse_room_worker_mask.force (mask, a_room_id)
+			else
+				mask := mask & bit_mask.bit_not
+				if mask = 0 then
+					sse_room_worker_mask.remove (a_room_id)
+				else
+					sse_room_worker_mask.force (mask, a_room_id)
+				end
+			end
+		end
+
+	clear_worker_subscriptions (a_worker_id: INTEGER)
+			-- Clear presence bits for worker `a_worker_id` across all room masks.
+		require
+			valid_worker: a_worker_id >= 0 and a_worker_id < 64
+		local
+			bit_mask: NATURAL_64
+			keys: ARRAYED_LIST [INTEGER]
+			r_id: INTEGER
+		do
+			bit_mask := ((1).to_natural_64 |<< a_worker_id).bit_not
+			create keys.make (ws_room_worker_mask.count)
+			across ws_room_worker_mask as ws_ic loop
+				keys.extend (@ws_ic.key)
+			end
+			across keys as k_ic loop
+				r_id := k_ic
+				if ws_room_worker_mask.has (r_id) then
+					ws_room_worker_mask.force (ws_room_worker_mask.item (r_id) & bit_mask, r_id)
+				end
+			end
+
+			create keys.make (sse_room_worker_mask.count)
+			across sse_room_worker_mask as sse_ic loop
+				keys.extend (@sse_ic.key)
+			end
+			across keys as k_ic loop
+				r_id := k_ic
+				if sse_room_worker_mask.has (r_id) then
+					sse_room_worker_mask.force (sse_room_worker_mask.item (r_id) & bit_mask, r_id)
+				end
+			end
+		end
+
 feature -- Pub/Sub Commands (Invoked from Workers)
 
 	publish (a_room_id: INTEGER; a_msg_handle: POINTER)
-			-- Broadcast message `a_msg_handle` across all worker shards for `a_room_id`.
+			-- Broadcast message `a_msg_handle` across worker shards with active subscribers in `a_room_id`.
 		require
 			valid_room: a_room_id >= 0
 			valid_msg: a_msg_handle /= default_pointer
 			active: not is_shutdown
 		local
 			i: INTEGER
+			mask, bit_mask: NATURAL_64
 		do
+			if ws_room_worker_mask.has (a_room_id) then
+				mask := ws_room_worker_mask.item (a_room_id)
+			else
+				mask := 0
+			end
 			from
 				i := 0
 			until
 				i >= workers.count
 			loop
-				dispatch_room_publish (workers.item (i), a_room_id, a_msg_handle)
+				bit_mask := (1).to_natural_64 |<< i
+				if (mask & bit_mask) /= 0 then
+					dispatch_room_publish (workers.item (i), a_room_id, a_msg_handle)
+				else
+					-- Worker shard has no local subscribers: unref on its behalf to maintain atomic balance
+					{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+				end
 				i := i + 1
 			end
 		rescue
@@ -115,20 +219,32 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 		end
 
 	publish_sse (a_room_id: INTEGER; a_msg_handle: POINTER)
-			-- Broadcast SSE message `a_msg_handle` across all worker shards for `a_room_id`.
+			-- Broadcast SSE message `a_msg_handle` across worker shards with active subscribers in `a_room_id`.
 		require
 			valid_room: a_room_id >= 0
 			valid_msg: a_msg_handle /= default_pointer
 			active: not is_shutdown
 		local
 			i: INTEGER
+			mask, bit_mask: NATURAL_64
 		do
+			if sse_room_worker_mask.has (a_room_id) then
+				mask := sse_room_worker_mask.item (a_room_id)
+			else
+				mask := 0
+			end
 			from
 				i := 0
 			until
 				i >= workers.count
 			loop
-				dispatch_sse_room_publish (workers.item (i), a_room_id, a_msg_handle)
+				bit_mask := (1).to_natural_64 |<< i
+				if (mask & bit_mask) /= 0 then
+					dispatch_sse_room_publish (workers.item (i), a_room_id, a_msg_handle)
+				else
+					-- Worker shard has no local subscribers: unref on its behalf to maintain atomic balance
+					{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+				end
 				i := i + 1
 			end
 		rescue
@@ -150,6 +266,12 @@ feature {NONE} -- Implementation
 
 	workers: SPECIAL [separate VR_WORKER]
 			-- Worker processors to broadcast messages to
+
+	ws_room_worker_mask: HASH_TABLE [NATURAL_64, INTEGER]
+			-- Room subscriber presence bitmask across worker shards for WebSocket rooms
+
+	sse_room_worker_mask: HASH_TABLE [NATURAL_64, INTEGER]
+			-- Room subscriber presence bitmask across worker shards for SSE rooms
 
 	dispatch_room_publish (a_worker: separate VR_WORKER; a_room_id: INTEGER; a_msg_handle: POINTER)
 			-- Asynchronous command passing basic value types to controlled worker.

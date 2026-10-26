@@ -171,6 +171,14 @@ feature -- Access
 			non_negative: Result >= 0
 		end
 
+	in_available_capacity: INTEGER
+			-- Available contiguous write capacity in `in_buf`
+		do
+			Result := in_buf.count - in_write_offset
+		ensure
+			non_negative: Result >= 0
+		end
+
 	out_buf_bytes: INTEGER
 			-- Number of unwritten bytes in outbound buffer
 		do
@@ -431,11 +439,67 @@ feature -- State Modifiers
 
 feature -- Data Ingestion Pipeline (Phase 4 Zero-Allocation Hook)
 
+	ensure_inbound_capacity (a_min_capacity: INTEGER)
+			-- Ensure at least `a_min_capacity` unwritten bytes available at `in_write_offset`.
+		require
+			valid_cap: a_min_capacity > 0
+		local
+			unread, needed: INTEGER
+		do
+			if in_buf.count - in_write_offset < a_min_capacity then
+				unread := in_write_offset - in_read_offset
+				if in_read_offset > 0 then
+					if unread > 0 then
+						{VR_REACTOR_BRIDGE}.c_memmove (in_buf.item, in_buf.item + in_read_offset, unread)
+					end
+					in_read_offset := 0
+					in_write_offset := unread
+				end
+				if in_buf.count - in_write_offset < a_min_capacity then
+					needed := ((in_write_offset + a_min_capacity) * 2).max (in_buf.count * 2)
+					in_buf.resize (needed)
+				end
+			end
+		ensure
+			has_capacity: in_buf.count - in_write_offset >= a_min_capacity
+		end
+
+	in_write_pointer: POINTER
+			-- Direct memory pointer to start of unwritten space in `in_buf`.
+		do
+			Result := in_buf.item + in_write_offset
+		ensure
+			valid_pointer: Result /= default_pointer
+		end
+
+	advance_in_write (a_n: INTEGER; a_now_ms: NATURAL_64)
+			-- Advance write pointer after direct kernel read into `in_buf` and drive pipeline.
+		require
+			valid_n: a_n > 0 and a_n <= in_available_capacity
+			valid_time: a_now_ms >= last_active_ms
+		do
+			touch (a_now_ms)
+			if request_started_ms = 0 and in_buf_bytes = 0 then
+				request_started_ms := a_now_ms
+			end
+			in_write_offset := in_write_offset + a_n
+			if proto_state = Proto_echo then
+				append_echo (in_buf.item + in_read_offset, in_buf_bytes)
+				in_read_offset := 0
+				in_write_offset := 0
+			else
+				process_inbound_pipeline (a_now_ms)
+			end
+		ensure
+			bytes_updated: in_buf_bytes >= 0
+		end
+
 	on_data_received (a_src: POINTER; a_len: INTEGER; a_now_ms: NATURAL_64)
 			-- Ingest incoming chunk from worker scratch buffer without heap allocations.
 		require
 			valid_src: a_src /= default_pointer
 			valid_len: a_len > 0
+			valid_time: a_now_ms >= last_active_ms
 		do
 			touch (a_now_ms)
 			if proto_state = Proto_echo then
@@ -972,23 +1036,8 @@ feature -- Inbound & Outbound Buffer Compaction
 		require
 			valid_src: a_src /= default_pointer
 			valid_len: a_len > 0
-		local
-			unread, needed: INTEGER
 		do
-			unread := in_write_offset - in_read_offset
-			if in_write_offset + a_len > in_buf.count then
-				if in_read_offset > 0 then
-					if unread > 0 then
-						{VR_REACTOR_BRIDGE}.c_memmove (in_buf.item, in_buf.item + in_read_offset, unread)
-					end
-					in_read_offset := 0
-					in_write_offset := unread
-				end
-				if in_write_offset + a_len > in_buf.count then
-					needed := ((in_write_offset + a_len) * 2).max (in_buf.count * 2)
-					in_buf.resize (needed)
-				end
-			end
+			ensure_inbound_capacity (a_len)
 			{VR_REACTOR_BRIDGE}.c_memmove (in_buf.item + in_write_offset, a_src, a_len)
 			in_write_offset := in_write_offset + a_len
 		ensure
