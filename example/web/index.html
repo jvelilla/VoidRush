@@ -942,7 +942,8 @@
       <div style="font-size: 0.75rem; color: var(--text-dim); line-height: 1.4; margin-top: 0.25rem; background: var(--bg-surface-elevated); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border-subtle);">
         <strong style="color: var(--text-muted);">OTP Invariants:</strong><br>
         • Isolated Faults: Handled by worker <code>rescue</code>; 0 dropped peers.<br>
-        • OTP Restarts: Worker shard hot-swapped; orphaned FDs purged by native kernel.
+        • OTP Restarts: Worker shard hot-swapped; orphaned FDs purged by native kernel.<br>
+        • Intensity Limiter: 25 restarts in 30s sliding window before fail-safe halt.
       </div>
     </div>
 
@@ -1198,6 +1199,8 @@
 
     let isHttpTransmitInFlight = false;
 
+    let lastTransmitErrorTime = 0;
+
     // Transmit Single Frame
     async function transmitFrame() {
       const room = parseInt(roomIdInput.value.trim() || '42');
@@ -1225,7 +1228,11 @@
             // Success acknowledged
           }
         } catch (e) {
-          appendEventCard('HTTP', `Transmit failed: ${e.message} (Tip: Use WebSocket for high-frequency streaming)`, true);
+          const now = Date.now();
+          if (now - lastTransmitErrorTime > 1500) {
+            lastTransmitErrorTime = now;
+            appendEventCard('HTTP', `Transmit failed: ${e.message} (Tip: Use WebSocket for high-frequency streaming)`, true);
+          }
         } finally {
           isHttpTransmitInFlight = false;
         }
@@ -1233,7 +1240,11 @@
         if (wsSocket && wsSocket.readyState === WebSocket.OPEN) {
           wsSocket.send(`PUB ${room} ${payload}`);
         } else {
-          appendEventCard('WS', 'Cannot transmit: WebSocket not connected.', true);
+          const now = Date.now();
+          if (now - lastTransmitErrorTime > 1500) {
+            lastTransmitErrorTime = now;
+            appendEventCard('WS', 'Cannot transmit: WebSocket reconnecting...', true);
+          }
         }
       }
     }
@@ -1390,9 +1401,20 @@
 
     // Poll Prometheus Metrics
     async function pollMetrics() {
+      const badge = document.getElementById('metricsPollBadge');
       try {
         const resp = await fetch(`${getBaseUrl()}/metrics`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          if (badge) {
+            badge.textContent = '● Gateway Tripped/Offline';
+            badge.style.color = 'var(--accent-rose)';
+          }
+          return;
+        }
+        if (badge) {
+          badge.textContent = '● 1s Poll';
+          badge.style.color = 'var(--accent-emerald)';
+        }
         const text = await resp.text();
 
         const getMetric = (name) => {
@@ -1427,7 +1449,10 @@
           updateShardMatrixConnections();
         }
       } catch (e) {
-        // quiet ignore during offline or restarts
+        if (badge) {
+          badge.textContent = '● Gateway Tripped/Offline';
+          badge.style.color = 'var(--accent-rose)';
+        }
       }
     }
 

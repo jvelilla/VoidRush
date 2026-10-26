@@ -44,6 +44,17 @@ feature -- Access
 			Result := supervisor.reactor_handle
 		end
 
+feature -- Configuration
+
+	set_restart_intensity (a_max_restarts: INTEGER; a_window_ms: NATURAL_64)
+			-- Configure sliding-window restart intensity thresholds on root supervisor.
+		require
+			valid_max: a_max_restarts > 0
+			valid_window: a_window_ms > 0
+		do
+			supervisor.set_restart_intensity (a_max_restarts, a_window_ms)
+		end
+
 feature -- Execution
 
 	start

@@ -22,6 +22,7 @@ feature {NONE} -- Initialization
 			io.put_string ("[telemetry_app] Initializing VR_ENGINE on port " + Default_telemetry_port.out + " with " + Default_telemetry_workers.out + " workers...%N")
 
 			create engine.make (Default_telemetry_port, Default_telemetry_workers)
+			engine.set_restart_intensity (25, 30000)
 
 			io.put_string ("[telemetry_app] VR_ENGINE online. Root supervisor active. Entering event loop...%N")
 			engine.start

@@ -131,6 +131,20 @@ feature -- Access
 			Result := reactor_handle /= default_pointer
 		end
 
+feature -- Configuration
+
+	set_restart_intensity (a_max_restarts: INTEGER; a_window_ms: NATURAL_64)
+			-- Configure sliding-window restart intensity thresholds.
+		require
+			valid_max: a_max_restarts > 0
+			valid_window: a_window_ms > 0
+		do
+			create intensity.make_custom (a_max_restarts, a_window_ms)
+		ensure
+			max_restarts_set: intensity.max_restarts = a_max_restarts
+			window_set: intensity.window_ms = a_window_ms
+		end
+
 feature -- Lifecycle Coordination
 
 	start_all
@@ -332,6 +346,7 @@ feature {NONE} -- Recovery Actions
 					s.set_state (State_running)
 				end
 			else
+				io.put_string ("[supervisor] FATAL: Broker restart intensity exceeded (" + intensity.max_restarts.out + " restarts in " + (intensity.window_ms // 1000).out + "s). Halting system.%N")
 				escalate_fatal_shutdown
 			end
 		end
@@ -369,6 +384,7 @@ feature {NONE} -- Recovery Actions
 					end
 				end
 			else
+				io.put_string ("[supervisor] FATAL: Worker #" + a_index.out + " restart intensity exceeded (" + intensity.max_restarts.out + " restarts in " + (intensity.window_ms // 1000).out + "s). Halting system.%N")
 				escalate_fatal_shutdown
 			end
 		end
