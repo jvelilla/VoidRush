@@ -1196,6 +1196,8 @@
       }
     }
 
+    let isHttpTransmitInFlight = false;
+
     // Transmit Single Frame
     async function transmitFrame() {
       const room = parseInt(roomIdInput.value.trim() || '42');
@@ -1211,6 +1213,8 @@
       });
 
       if (proto === 'http') {
+        if (isHttpTransmitInFlight) return; // Prevent browser socket pool exhaustion at high frequencies
+        isHttpTransmitInFlight = true;
         try {
           const resp = await fetch(`${getBaseUrl()}/events`, {
             method: 'POST',
@@ -1221,7 +1225,9 @@
             // Success acknowledged
           }
         } catch (e) {
-          appendEventCard('HTTP', `Transmit failed: ${e.message}`, true);
+          appendEventCard('HTTP', `Transmit failed: ${e.message} (Tip: Use WebSocket for high-frequency streaming)`, true);
+        } finally {
+          isHttpTransmitInFlight = false;
         }
       } else {
         if (wsSocket && wsSocket.readyState === WebSocket.OPEN) {
@@ -1258,6 +1264,13 @@
         const rate = pill.getAttribute('data-rate');
         currentStreamDelayMs = parseInt(pill.getAttribute('data-interval'), 10);
         streamRateLabel.textContent = `${rate} updates / sec`;
+
+        // Automatically select WebSocket for high-frequency 250 updates/sec to prevent browser HTTP limit saturation
+        if (rate === '250' && protocolSelect.value === 'http') {
+          protocolSelect.value = 'ws';
+          appendEventCard('WS', '⚡ Switched Ingest Protocol to WebSocket for 250 updates/sec full-duplex stream.');
+        }
+
         if (autoStreamToggle.checked) {
           restartAutoStreamTimer();
         }
@@ -1276,14 +1289,17 @@
 
     // Update Worker Shard Matrix Connection Counts
     function updateShardMatrixConnections() {
+      const activeTotal = parseInt(mActiveConns.textContent || '0', 10);
       const activeSSE = (sseSource && sseSource.readyState === EventSource.OPEN) ? 1 : 0;
       const activeWS = (wsSocket && wsSocket.readyState === WebSocket.OPEN) ? 1 : 0;
+      const total = Math.max(activeSSE + activeWS, activeTotal);
       
-      // Distribute connection indicators predictably across shards
-      document.getElementById('shardConns0').textContent = activeSSE;
-      document.getElementById('shardConns1').textContent = activeWS;
-      document.getElementById('shardConns2').textContent = '0';
-      document.getElementById('shardConns3').textContent = '0';
+      // Distribute connection indicators dynamically across all 4 worker shards
+      for (let i = 0; i < 4; i++) {
+        const count = Math.floor(total / 4) + (i < (total % 4) ? 1 : 0);
+        const el = document.getElementById(`shardConns${i}`);
+        if (el) el.textContent = count;
+      }
     }
 
     // Chaos action 1: Connection Fault
@@ -1392,6 +1408,7 @@
         mRestartsTotal.textContent = getMetric('vr_supervisor_restarts_total');
         mEventsTotal.textContent = getMetric('vr_events_total');
         mStaleEvents.textContent = getMetric('vr_stale_events_total');
+        updateShardMatrixConnections();
       } catch (e) {
         // quiet ignore during offline or restarts
       }
