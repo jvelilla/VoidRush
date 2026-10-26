@@ -1400,6 +1400,11 @@
           return m ? m[1] : '0';
         };
 
+        const getWorkerMetric = (id) => {
+          const m = text.match(new RegExp(`^vr_worker_connections_active\\{worker="${id}"\\}\\s+(\\d+)`, 'm'));
+          return m ? parseInt(m[1], 10) : null;
+        };
+
         mActiveConns.textContent = getMetric('vr_connections_active');
         mAcceptsTotal.textContent = getMetric('vr_accepts_total');
         mSseOut.textContent = getMetric('vr_sse_events_out_total');
@@ -1408,7 +1413,19 @@
         mRestartsTotal.textContent = getMetric('vr_supervisor_restarts_total');
         mEventsTotal.textContent = getMetric('vr_events_total');
         mStaleEvents.textContent = getMetric('vr_stale_events_total');
-        updateShardMatrixConnections();
+
+        let hasWorkerMetrics = false;
+        for (let i = 0; i < 4; i++) {
+          const wConn = getWorkerMetric(i);
+          if (wConn !== null) {
+            hasWorkerMetrics = true;
+            const el = document.getElementById(`shardConns${i}`);
+            if (el) el.textContent = wConn;
+          }
+        }
+        if (!hasWorkerMetrics) {
+          updateShardMatrixConnections();
+        }
       } catch (e) {
         // quiet ignore during offline or restarts
       }

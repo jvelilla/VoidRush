@@ -20,7 +20,11 @@ feature {NONE} -- Initialization
 		require
 			valid_handle: a_handle /= default_pointer
 		do
+			create worker_conns.make_empty
 			refresh (a_handle)
+		ensure
+			worker_conns_valid: worker_conns.count = Max_workers
+			active_workers_valid: active_worker_count >= 1 and active_worker_count <= Max_workers
 		end
 
 feature -- Access
@@ -76,6 +80,12 @@ feature -- Access
 	supervisor_isolated_faults_total: NATURAL_64
 			-- Cumulative total connection faults isolated without child crash
 
+	worker_conns: ARRAY [NATURAL_32]
+			-- Active connections per worker shard (indexed 0 .. Max_workers - 1)
+
+	active_worker_count: INTEGER
+			-- Count of worker shards to expose in metrics
+
 feature -- Status Report
 
 	refresh (a_handle: POINTER)
@@ -84,6 +94,8 @@ feature -- Status Report
 			valid_handle: a_handle /= default_pointer
 		local
 			buf: MANAGED_POINTER
+			i: INTEGER
+			w_conns: NATURAL_32
 		do
 			create buf.make (Metrics_size)
 			{VR_REACTOR_BRIDGE}.c_reactor_get_metrics (a_handle, buf.item)
@@ -104,17 +116,45 @@ feature -- Status Report
 			sse_dropped_backpressure_total := buf.read_natural_64 (112)
 			supervisor_restarts_total := buf.read_natural_64 (120)
 			supervisor_isolated_faults_total := buf.read_natural_64 (128)
+
+			-- Snapshot per-worker atomic connection loads
+			create worker_conns.make_filled (0, 0, Max_workers - 1)
+			active_worker_count := 4
+			from
+				i := 0
+			until
+				i >= Max_workers
+			loop
+				w_conns := {VR_REACTOR_BRIDGE}.c_reactor_get_worker_conns (a_handle, i)
+				worker_conns.put (w_conns, i)
+				if (w_conns > 0 or {VR_REACTOR_BRIDGE}.c_reactor_get_worker_beat (a_handle, i) > 0) and (i + 1 > active_worker_count) then
+					active_worker_count := i + 1
+				end
+				i := i + 1
+			end
 		end
 
 feature -- Output
 
 	to_prometheus_format: STRING_8
 			-- Prometheus text exposition format.
+		local
+			i: INTEGER
 		do
-			create Result.make (1024)
+			create Result.make (2048)
 			Result.append ("# HELP vr_connections_active Currently active connections%N")
 			Result.append ("# TYPE vr_connections_active gauge%N")
 			Result.append ("vr_connections_active " + active_connections.out + "%N")
+			Result.append ("# HELP vr_worker_connections_active Active connections assigned per worker shard%N")
+			Result.append ("# TYPE vr_worker_connections_active gauge%N")
+			from
+				i := 0
+			until
+				i >= active_worker_count
+			loop
+				Result.append ("vr_worker_connections_active{worker=%"" + i.out + "%"} " + worker_conns.item (i).out + "%N")
+				i := i + 1
+			end
 			Result.append ("# HELP vr_accepts_total Cumulative accepted connections%N")
 			Result.append ("# TYPE vr_accepts_total counter%N")
 			Result.append ("vr_accepts_total " + accepts_total.out + "%N")
@@ -178,5 +218,9 @@ feature -- Output
 			Result.append (", sup_restarts=" + supervisor_restarts_total.out)
 			Result.append (", sup_faults=" + supervisor_isolated_faults_total.out + "]")
 		end
+
+invariant
+	valid_worker_conns: worker_conns.count = Max_workers
+	valid_active_workers: active_worker_count >= 1 and active_worker_count <= Max_workers
 
 end
