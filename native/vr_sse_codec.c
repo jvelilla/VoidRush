@@ -95,7 +95,7 @@ vr_ws_msg_t *vr_sse_msg_create(
     const char *data,  size_t data_len,
     int initial_refs
 ) {
-    size_t est_cap = data_len * 2 + id_len + event_len + 128;
+    size_t est_cap = data_len * 7 + id_len + event_len + 32;
     char *stack_buf = (char *)malloc(est_cap);
     if (!stack_buf) return NULL;
 

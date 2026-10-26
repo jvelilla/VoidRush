@@ -23,3 +23,7 @@ native/test_vr_reactor
 .DS_Store
 Thumbs.db
 
+# TLA+ / TLC Model Checker temporary artifacts
+states/
+*.jar
+

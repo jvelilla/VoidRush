@@ -4,6 +4,7 @@ param (
 )
 
 $ErrorActionPreference = "Continue"
+[System.Net.ServicePointManager]::Expect100Continue = $false
 
 Write-Host "========================================================================" -ForegroundColor Cyan
 Write-Host "  VoidRush Telemetry Gateway - Automated Walkthrough Test" -ForegroundColor Cyan

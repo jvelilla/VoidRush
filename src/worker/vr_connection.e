@@ -159,6 +159,18 @@ feature -- Access
 	last_sse_event_id: STRING_8
 			-- Last processed or received event ID for reconnection resumption
 
+	pending_route: INTEGER
+			-- Pre-classified route of current in-flight request
+
+	pending_room_id: INTEGER
+			-- Room ID parsed from query string before header buffers shift
+
+	pending_fault_kind: INTEGER
+			-- Targeted fault kind (1=worker, 2=broker, 3=conn) for /debug/fault
+
+	pending_fault_target: INTEGER
+			-- Target worker ID for worker crash simulation
+
 	sse_broadcast_handler: detachable PROCEDURE [INTEGER, POINTER, INTEGER]
 			-- Callback into worker to broadcast SSE message across workers (room, ptr, len)
 
@@ -547,6 +559,7 @@ feature {NONE} -- Inbound Protocol Pipeline
 					end
 				elseif proto_state = Proto_http_reading_headers then
 					if http_parser.try_parse_request_header (in_buf, in_read_offset, in_write_offset) then
+						classify_http_route
 						in_read_offset := in_read_offset + http_parser.header_bytes_consumed
 						if in_read_offset = in_write_offset then
 							in_read_offset := 0
@@ -575,7 +588,7 @@ feature {NONE} -- Inbound Protocol Pipeline
 						elseif http_parser.is_sse_request (in_buf) then
 							process_sse_handshake (a_now_ms)
 							done := True
-						elseif http_parser.is_sse_publish_request (in_buf) then
+						elseif pending_route = Route_sse_publish then
 							if http_parser.content_length > 0 then
 								proto_state := Proto_http_reading_body
 								if in_buf_bytes >= http_parser.content_length then
@@ -623,7 +636,7 @@ feature {NONE} -- Inbound Protocol Pipeline
 					end
 				elseif proto_state = Proto_http_reading_body then
 					if in_buf_bytes >= http_parser.content_length then
-						if http_parser.is_sse_publish_request (in_buf) then
+						if pending_route = Route_sse_publish then
 							process_http_body (a_now_ms)
 						else
 							drain_http_body
@@ -679,12 +692,16 @@ feature {NONE} -- Inbound Protocol Pipeline
 				in_write_offset := 0
 			end
 
-			target_room := http_parser.query_room_id (in_buf)
+			target_room := pending_room_id
+			if target_room = 0 and body_len > 0 then
+				target_room := extract_room_from_payload (body_ptr, body_len)
+			end
 			if attached sse_broadcast_handler as sbh then
 				sbh.call ([target_room, body_ptr, body_len])
 			end
 
 			append_outbound_string (Sse_accepted_post_response)
+			pending_route := Route_none
 			if not http_parser.is_keep_alive then
 				mark_closing
 			else
@@ -696,6 +713,36 @@ feature {NONE} -- Inbound Protocol Pipeline
 				end
 				http_parser.reset
 			end
+		end
+
+	extract_room_from_payload (a_ptr: POINTER; a_len: INTEGER): INTEGER
+			-- Attempt fast scan for "room": <digits> in JSON payload. Returns 0 if absent.
+		require
+			valid_ptr: a_ptr /= default_pointer
+			valid_len: a_len >= 0
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"[
+				const char *p = (const char *) $a_ptr;
+				size_t len = (size_t) $a_len;
+				int room = 0;
+				for (size_t i = 0; i + 6 < len; i++) {
+					if (p[i] == '"' && p[i+1] == 'r' && p[i+2] == 'o' && p[i+3] == 'o' && p[i+4] == 'm' && p[i+5] == '"') {
+						size_t j = i + 6;
+						while (j < len && (p[j] == ' ' || p[j] == ':')) j++;
+						while (j < len && p[j] >= '0' && p[j] <= '9') {
+							room = room * 10 + (p[j] - '0');
+							j++;
+						}
+						return room;
+					}
+				}
+				return 0;
+			]"
+		ensure
+			instance_free: class
+			valid_room: Result >= 0
 		end
 
 	drain_http_body
@@ -714,6 +761,7 @@ feature {NONE} -- Inbound Protocol Pipeline
 	finish_http_request (a_now_ms: NATURAL_64)
 			-- Finalize keep-alive or close after standard HTTP request.
 		do
+			pending_route := Route_none
 			if not http_parser.is_keep_alive then
 				mark_closing
 			else
@@ -932,24 +980,18 @@ feature {NONE} -- Inbound Protocol Pipeline
 	handle_http_request (a_now_ms: NATURAL_64)
 			-- Dispatch parsed HTTP request to fast path or standard response.
 		do
-			if http_parser.method = Method_options then
+			inspect pending_route
+			when Route_options then
 				append_options_response
-			elseif http_parser.method = Method_get and then
-			   http_parser.path_slice.same_as_string (in_buf, "/healthz") then
+			when Route_healthz then
 				append_static_healthz_response
-			elseif http_parser.method = Method_get and then
-			       http_parser.path_slice.same_as_string (in_buf, "/metrics") then
+			when Route_metrics then
 				append_metrics_response
-			elseif (http_parser.method = Method_post or http_parser.method = Method_get) and then
-			       http_parser.path_slice.same_as_string (in_buf, "/debug/fault") then
+			when Route_debug_fault then
 				handle_debug_fault
-			elseif http_parser.method = Method_get and then
-			       (http_parser.path_slice.same_as_string (in_buf, "/") or
-			        http_parser.path_slice.same_as_string (in_buf, "/index.html") or
-			        http_parser.path_slice.same_as_string (in_buf, "/dashboard")) then
+			when Route_dashboard then
 				append_dashboard_html_response
-			elseif http_parser.method = Method_get and then
-			       http_parser.path_slice.same_as_string (in_buf, "/echo") then
+			when Route_echo then
 				append_standard_response ("VoidRush HTTP/1.1 Engine OK")
 			else
 				append_error_response (404, "Not Found")
@@ -1012,24 +1054,14 @@ feature {NONE} -- Inbound Protocol Pipeline
 		local
 			w_id: INTEGER
 		do
-			if http_parser.query_slice.has_substring_case_insensitive (in_buf, "worker") then
-				if http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=1") then
-					w_id := 1
-				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=2") then
-					w_id := 2
-				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=3") then
-					w_id := 3
-				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=0") then
-					w_id := 0
-				else
-					w_id := fd \\ 4
-				end
+			if pending_fault_kind = 1 then
+				w_id := pending_fault_target
 				if reactor_handle /= default_pointer then
 					{VR_REACTOR_BRIDGE}.c_reactor_report_worker_fault (reactor_handle, w_id)
 					{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
 				end
 				append_standard_response ("Fault Injected: Worker #" + w_id.out + " Crashed%N")
-			elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "broker") then
+			elseif pending_fault_kind = 2 then
 				if reactor_handle /= default_pointer then
 					{VR_REACTOR_BRIDGE}.c_reactor_report_broker_fault (reactor_handle)
 					{VR_REACTOR_BRIDGE}.c_reactor_wake (reactor_handle)
@@ -1040,6 +1072,69 @@ feature {NONE} -- Inbound Protocol Pipeline
 				check deliberate_connection_fault: False end
 			end
 		end
+
+	classify_http_route
+			-- Classify route and snapshot query parameters while headers are guaranteed in in_buf.
+		do
+			pending_fault_kind := 0
+			pending_fault_target := 0
+			pending_room_id := 0
+			if http_parser.method = Method_options then
+				pending_route := Route_options
+			elseif http_parser.is_sse_publish_request (in_buf) then
+				pending_route := Route_sse_publish
+				pending_room_id := http_parser.query_room_id (in_buf)
+			elseif http_parser.method = Method_get and then
+			       http_parser.path_slice.same_as_string (in_buf, "/healthz") then
+				pending_route := Route_healthz
+			elseif http_parser.method = Method_get and then
+			       http_parser.path_slice.same_as_string (in_buf, "/metrics") then
+				pending_route := Route_metrics
+			elseif (http_parser.method = Method_post or http_parser.method = Method_get) and then
+			       http_parser.path_slice.same_as_string (in_buf, "/debug/fault") then
+				pending_route := Route_debug_fault
+				if http_parser.query_slice.has_substring_case_insensitive (in_buf, "worker") then
+					pending_fault_kind := 1
+					if http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=1") then
+						pending_fault_target := 1
+					elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=2") then
+						pending_fault_target := 2
+					elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=3") then
+						pending_fault_target := 3
+					elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "id=0") then
+						pending_fault_target := 0
+					else
+						pending_fault_target := fd \\ 4
+					end
+				elseif http_parser.query_slice.has_substring_case_insensitive (in_buf, "broker") then
+					pending_fault_kind := 2
+				else
+					pending_fault_kind := 3
+				end
+			elseif http_parser.method = Method_get and then
+			       (http_parser.path_slice.same_as_string (in_buf, "/") or
+			        http_parser.path_slice.same_as_string (in_buf, "/index.html") or
+			        http_parser.path_slice.same_as_string (in_buf, "/dashboard")) then
+				pending_route := Route_dashboard
+			elseif http_parser.method = Method_get and then
+			       http_parser.path_slice.same_as_string (in_buf, "/echo") then
+				pending_route := Route_echo
+			else
+				pending_route := Route_not_found
+			end
+		end
+
+feature {NONE} -- Route Constants
+
+	Route_none: INTEGER = 0
+	Route_options: INTEGER = 1
+	Route_healthz: INTEGER = 2
+	Route_metrics: INTEGER = 3
+	Route_debug_fault: INTEGER = 4
+	Route_dashboard: INTEGER = 5
+	Route_echo: INTEGER = 6
+	Route_sse_publish: INTEGER = 7
+	Route_not_found: INTEGER = 8
 
 	append_metrics_response
 			-- Expose Prometheus metrics from native reactor.

@@ -371,10 +371,19 @@ void vr_reactor_metric_inc_open(vr_reactor_t *r) {
     }
 }
 
-void vr_reactor_metric_dec_open(vr_reactor_t *r) {
-    if (r) {
-        __atomic_sub_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
+static inline void vr_reactor_saturating_dec_active(vr_reactor_t *r) {
+    if (!r) return;
+    uint64_t cur = __atomic_load_n(&r->active_connections, __ATOMIC_RELAXED);
+    while (cur > 0) {
+        if (__atomic_compare_exchange_n(&r->active_connections, &cur, cur - 1,
+                                        1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            break;
+        }
     }
+}
+
+void vr_reactor_metric_dec_open(vr_reactor_t *r) {
+    vr_reactor_saturating_dec_active(r);
 }
 
 void vr_reactor_metric_inc_events(vr_reactor_t *r, uint64_t count) {
@@ -548,6 +557,17 @@ int16_t vr_reactor_get_fd_owner(const vr_reactor_t *r, int fd) {
     return __atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE);
 }
 
+void vr_reactor_release_worker_conn(vr_reactor_t *r, int worker_id) {
+    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return;
+    uint32_t cur = __atomic_load_n(&r->worker_conns[worker_id], __ATOMIC_ACQUIRE);
+    while (cur > 0) {
+        if (__atomic_compare_exchange_n(&r->worker_conns[worker_id], &cur, cur - 1U,
+                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+    }
+}
+
 int vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id) {
     if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return 0;
     int purged = 0;
@@ -557,9 +577,7 @@ int vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id) {
                                         0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
             close(fd);
-            if (r->active_connections > 0) {
-                __atomic_sub_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
-            }
+            vr_reactor_saturating_dec_active(r);
             purged++;
         }
     }
@@ -579,6 +597,10 @@ int vr_reactor_close_fd_for_worker(vr_reactor_t *r, int fd, int worker_id) {
             return -1;
         }
     }
+    /* Atomically decrement per-worker load and total active connections */
+    vr_reactor_release_worker_conn(r, worker_id);
+    vr_reactor_saturating_dec_active(r);
+
     epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
     return close(fd);
 }
@@ -595,19 +617,38 @@ int vr_reactor_assign_worker(vr_reactor_t *r, int fd, int worker_count) {
         return w;
     }
 
-    int best = 0;
-    uint32_t best_load = __atomic_load_n(&r->worker_conns[0], __ATOMIC_ACQUIRE);
-    for (int i = 1; i < worker_count; i++) {
+    uint64_t faults = __atomic_load_n(&r->child_fault_mask, __ATOMIC_ACQUIRE);
+    int best = -1;
+    uint32_t best_load = UINT32_MAX;
+
+    for (int i = 0; i < worker_count; i++) {
+        if (i < 63 && (faults & (((uint64_t)1) << i))) {
+            continue; /* Skip dead or restarting worker in fault mask */
+        }
         uint32_t load = __atomic_load_n(&r->worker_conns[i], __ATOMIC_ACQUIRE);
-        if (load < best_load) {
+        if (best == -1 || load < best_load) {
             best = i;
             best_load = load;
         }
     }
-    __atomic_add_fetch(&r->worker_conns[best], 1U, __ATOMIC_ACQ_REL);
+
+    /* Fallback if all workers are in fault mask */
+    if (best == -1) {
+        best = 0;
+        best_load = __atomic_load_n(&r->worker_conns[0], __ATOMIC_ACQUIRE);
+        for (int i = 1; i < worker_count; i++) {
+            uint32_t load = __atomic_load_n(&r->worker_conns[i], __ATOMIC_ACQUIRE);
+            if (load < best_load) {
+                best = i;
+                best_load = load;
+            }
+        }
+    }
+
     if (fd >= 0) {
         __atomic_store_n(&r->fd_owner[fd], (int16_t)best, __ATOMIC_RELEASE);
     }
+    __atomic_add_fetch(&r->worker_conns[best], 1U, __ATOMIC_ACQ_REL);
     return best;
 }
 
@@ -620,17 +661,6 @@ int vr_reactor_route_fd(const vr_reactor_t *r, int fd, int worker_count) {
     int16_t owner = __atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE);
     if (owner < 0 || owner >= worker_count) return -1;
     return (int)owner;
-}
-
-void vr_reactor_release_worker_conn(vr_reactor_t *r, int worker_id) {
-    if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return;
-    uint32_t cur = __atomic_load_n(&r->worker_conns[worker_id], __ATOMIC_ACQUIRE);
-    while (cur > 0) {
-        if (__atomic_compare_exchange_n(&r->worker_conns[worker_id], &cur, cur - 1U,
-                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            break;
-        }
-    }
 }
 
 uint32_t vr_reactor_get_worker_conns(const vr_reactor_t *r, int worker_id) {

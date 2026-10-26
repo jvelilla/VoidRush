@@ -1010,7 +1010,8 @@
     }
 
     function getWsUrl() {
-      return getBaseUrl().replace(/^http/, 'ws') + '/ws';
+      const room = roomIdInput ? (roomIdInput.value.trim() || '42') : '42';
+      return getBaseUrl().replace(/^http/, 'ws') + `/ws?room=${room}`;
     }
 
     // Append standard or sequence-badged event card to feed
@@ -1219,7 +1220,7 @@
         if (isHttpTransmitInFlight) return; // Prevent browser socket pool exhaustion at high frequencies
         isHttpTransmitInFlight = true;
         try {
-          const resp = await fetch(`${getBaseUrl()}/events`, {
+          const resp = await fetch(`${getBaseUrl()}/events?room=${room}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: payload
@@ -1459,6 +1460,11 @@
     // Event Listeners
     btnTransmit.addEventListener('click', transmitFrame);
     btnClearFeed.addEventListener('click', () => { feedList.innerHTML = ''; });
+    roomIdInput.addEventListener('change', () => {
+      wsReconnectAttempts = 0;
+      connectSSE();
+      connectWS();
+    });
     btnToggleConnect.addEventListener('click', () => {
       wsReconnectAttempts = 0;
       connectSSE();

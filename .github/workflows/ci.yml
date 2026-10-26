@@ -35,3 +35,36 @@ jobs:
             -v "${{ github.workspace }}:/opt/eiffel/src:rw" \
             -v "${{ github.workspace }}/docker/_build:/opt/eiffel/build:rw" \
             voidrush/tool-eiffel-compilation test
+
+  tla-verification:
+    name: TLA+ Formal Concurrency Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache TLC Model Checker
+        uses: actions/cache@v4
+        id: tla-cache
+        with:
+          path: /tmp/tla2tools.jar
+          key: tla2tools-v1.8.0
+
+      - name: Download TLC Model Checker
+        if: steps.tla-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L -o /tmp/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+
+      - name: Run TLC Model Checker (CI Profile)
+        run: |
+          java -XX:+UseParallelGC -cp /tmp/tla2tools.jar tlc2.TLC \
+            -deadlock \
+            -workers auto \
+            -config formal/tla/VR_Reactor_Concurrency_CI.cfg \
+            formal/tla/VR_Reactor_Concurrency.tla
+

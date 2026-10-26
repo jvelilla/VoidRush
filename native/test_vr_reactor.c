@@ -477,6 +477,70 @@ int main(void) {
     assert(vr_reactor_next_room_seq(sup_r, 43) == 1ULL);
     assert(vr_reactor_next_room_seq(sup_r, 42) == 3ULL);
 
+    /* 11. Testing TLA+ Remediation: Fault-mask routing, atomic close, saturating dec, SSE multiline */
+    printf("[test_vr_reactor] 11. Testing TLA+ remediation fixes...\n");
+
+    /* 11a. Assignment skips faulted workers */
+    vr_reactor_t *rem_r = vr_reactor_create();
+    assert(rem_r != NULL);
+    assert(vr_reactor_get_worker_conns(rem_r, 0) == 0);
+    assert(vr_reactor_get_worker_conns(rem_r, 1) == 0);
+
+    /* Fault worker 0: assignment must skip worker 0 and choose worker 1 */
+    vr_reactor_report_worker_fault(rem_r, 0);
+    int assigned_w = vr_reactor_assign_worker(rem_r, 200, 2);
+    assert(assigned_w == 1);
+    assert(vr_reactor_get_worker_conns(rem_r, 1) == 1);
+    assert(vr_reactor_get_worker_conns(rem_r, 0) == 0);
+
+    /* After fault cleared, worker 0 is eligible and chosen because load is 0 < 1 */
+    uint64_t consumed = vr_reactor_consume_fault_mask(rem_r);
+    assert(consumed == (1ULL << 0));
+    assigned_w = vr_reactor_assign_worker(rem_r, 201, 2);
+    assert(assigned_w == 0);
+    assert(vr_reactor_get_worker_conns(rem_r, 0) == 1);
+
+    /* 11b. Atomic close_fd_for_worker updates both worker_conns and active_connections */
+    vr_reactor_metrics_t rem_m;
+    vr_reactor_get_metrics(rem_r, &rem_m);
+    assert(rem_m.active_connections == 0);
+
+    /* Simulate tracking 1 active conn */
+    vr_reactor_metric_inc_open(rem_r);
+    vr_reactor_get_metrics(rem_r, &rem_m);
+    assert(rem_m.active_connections == 1);
+
+    int test_s = socket(AF_INET, SOCK_STREAM, 0);
+    assert(test_s >= 0);
+    vr_reactor_set_fd_owner(rem_r, test_s, 0);
+    /* Close for worker 0 atomically decrements worker 0 load and active_conns */
+    assert(vr_reactor_close_fd_for_worker(rem_r, test_s, 0) == 0);
+    assert(vr_reactor_get_worker_conns(rem_r, 0) == 0);
+    vr_reactor_get_metrics(rem_r, &rem_m);
+    assert(rem_m.active_connections == 0);
+
+    /* Duplicate close fails and does NOT underflow active_connections */
+    assert(vr_reactor_close_fd_for_worker(rem_r, test_s, 0) == -1);
+    vr_reactor_get_metrics(rem_r, &rem_m);
+    assert(rem_m.active_connections == 0);
+
+    /* 11c. Saturating decrement test on active_connections */
+    vr_reactor_metric_dec_open(rem_r);
+    vr_reactor_get_metrics(rem_r, &rem_m);
+    assert(rem_m.active_connections == 0);
+
+    /* 11d. SSE multi-line data with 250 newlines (previously failed due to under-allocation) */
+    char sse_data[256];
+    for (int i = 0; i < 250; i++) {
+        sse_data[i] = '\n';
+    }
+    sse_data[250] = '\0';
+    vr_ws_msg_t *sse_multi_msg = vr_sse_msg_create("id1", 3, "ev1", 3, sse_data, 250, 1);
+    assert(sse_multi_msg != NULL);
+    assert(sse_multi_msg->total_len > 250 * 6);
+    vr_ws_msg_unref(sse_multi_msg);
+
+    vr_reactor_destroy(rem_r);
     vr_reactor_destroy(sup_r);
 
     printf("[test_vr_reactor] All native VR reactor unit tests passed successfully!\n");

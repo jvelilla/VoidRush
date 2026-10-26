@@ -415,11 +415,24 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_room: a_room_id >= 0
 			valid_len: a_len >= 0
 		local
-			msg_ptr: POINTER
+			msg_ptr, sse_msg_ptr: POINTER
+			c_empty, c_id: ANY
+			empty_str, id_str: STRING_8
+			seq: NATURAL_64
 		do
 			msg_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_create (a_opcode, a_payload, a_len, total_workers)
 			if msg_ptr /= default_pointer then
 				dispatch_broker_publish (broker, a_room_id, msg_ptr)
+			end
+			-- Tri-protocol convergence: Fan out to SSE subscribers as well
+			empty_str := ""
+			c_empty := empty_str.to_c
+			seq := {VR_REACTOR_BRIDGE}.c_reactor_next_room_seq (reactor_handle, a_room_id)
+			id_str := seq.out
+			c_id := id_str.to_c
+			sse_msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, id_str.count, $c_empty, 0, a_payload, a_len, total_workers)
+			if sse_msg_ptr /= default_pointer then
+				dispatch_broker_publish_sse (broker, a_room_id, seq, sse_msg_ptr)
 			end
 		end
 
@@ -568,7 +581,7 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_room: a_room_id >= 0
 			valid_data: a_data /= Void
 		local
-			msg_ptr: POINTER
+			msg_ptr, ws_msg_ptr: POINTER
 			c_id, c_ev, c_dt: ANY
 			seq: NATURAL_64
 			final_id: STRING_8
@@ -591,6 +604,11 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			if msg_ptr /= default_pointer then
 				dispatch_broker_publish_sse (broker, a_room_id, seq, msg_ptr)
 			end
+			-- Tri-protocol convergence: Fan out to WebSocket subscribers as well
+			ws_msg_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_create (Ws_opcode_text, $c_dt, a_data.count, total_workers)
+			if ws_msg_ptr /= default_pointer then
+				dispatch_broker_publish (broker, a_room_id, ws_msg_ptr)
+			end
 		end
 
 	publish_sse_broadcast_from_slice (a_room_id: INTEGER; a_payload: POINTER; a_len: INTEGER)
@@ -599,7 +617,7 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			valid_room: a_room_id >= 0
 			valid_len: a_len >= 0
 		local
-			msg_ptr: POINTER
+			msg_ptr, ws_msg_ptr: POINTER
 			c_empty, c_id: ANY
 			empty_str, id_str: STRING_8
 			seq: NATURAL_64
@@ -612,6 +630,11 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, id_str.count, $c_empty, 0, a_payload, a_len, total_workers)
 			if msg_ptr /= default_pointer then
 				dispatch_broker_publish_sse (broker, a_room_id, seq, msg_ptr)
+			end
+			-- Tri-protocol convergence: Fan out to WebSocket subscribers as well
+			ws_msg_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_create (Ws_opcode_text, a_payload, a_len, total_workers)
+			if ws_msg_ptr /= default_pointer then
+				dispatch_broker_publish (broker, a_room_id, ws_msg_ptr)
 			end
 		end
 
@@ -761,13 +784,11 @@ feature {NONE} -- Implementation
 				sse_active_fds.remove (a_fd)
 				conn.mark_closed
 				connections.remove (a_fd)
-				{VR_REACTOR_BRIDGE}.c_reactor_release_worker_conn (reactor_handle, worker_id)
 				if reactor_handle /= default_pointer then
 					res := {VR_REACTOR_BRIDGE}.c_reactor_close_fd_for_worker (reactor_handle, a_fd, worker_id)
 				else
 					res := {VR_REACTOR_BRIDGE}.c_close (a_fd)
 				end
-				{VR_REACTOR_BRIDGE}.c_metric_dec_open (reactor_handle)
 			end
 		ensure
 			not_in_table: not connections.has (a_fd)
