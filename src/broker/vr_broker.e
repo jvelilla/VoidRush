@@ -18,6 +18,7 @@ feature {NONE} -- Initialization
 			create workers.make_empty (Default_worker_count)
 			create ws_room_worker_mask.make (64)
 			create sse_room_worker_mask.make (64)
+			create sse_replay_buffers.make (64)
 			is_shutdown := False
 		ensure
 			empty_workers: workers.count = 0
@@ -218,8 +219,9 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 			end
 		end
 
-	publish_sse (a_room_id: INTEGER; a_msg_handle: POINTER)
-			-- Broadcast SSE message `a_msg_handle` across worker shards with active subscribers in `a_room_id`.
+	publish_sse (a_room_id: INTEGER; a_seq: NATURAL_64; a_msg_handle: POINTER)
+			-- Broadcast SSE message `a_msg_handle` across worker shards with active subscribers in `a_room_id`,
+			-- and record into per-room replay ring buffer.
 		require
 			valid_room: a_room_id >= 0
 			valid_msg: a_msg_handle /= default_pointer
@@ -227,7 +229,25 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 		local
 			i: INTEGER
 			mask, bit_mask: NATURAL_64
+			rl: ARRAYED_LIST [TUPLE [seq: NATURAL_64; msg: POINTER]]
+			dropped: TUPLE [seq: NATURAL_64; msg: POINTER]
 		do
+			-- Replay ring-buffer maintenance
+			if not sse_replay_buffers.has (a_room_id) then
+				create rl.make (64)
+				sse_replay_buffers.put (rl, a_room_id)
+			end
+			if attached sse_replay_buffers.item (a_room_id) as replay_list then
+				{VR_REACTOR_BRIDGE}.c_ws_msg_ref (a_msg_handle)
+				replay_list.extend ([a_seq, a_msg_handle])
+				if replay_list.count > 1024 then
+					dropped := replay_list.first
+					replay_list.start
+					replay_list.remove
+					{VR_REACTOR_BRIDGE}.c_ws_msg_unref (dropped.msg)
+				end
+			end
+
 			if sse_room_worker_mask.has (a_room_id) then
 				mask := sse_room_worker_mask.item (a_room_id)
 			else
@@ -254,10 +274,46 @@ feature -- Pub/Sub Commands (Invoked from Workers)
 			end
 		end
 
+	replay_sse_for_worker (a_worker: separate VR_WORKER; a_fd, a_room_id: INTEGER; a_last_seq: NATURAL_64)
+			-- Replay unexpired SSE messages with sequence > `a_last_seq` to newly connected client `a_fd`.
+		require
+			valid_worker: a_worker /= Void
+			valid_fd: a_fd >= 0
+			valid_room: a_room_id >= 0
+		local
+			msg_h: POINTER
+		do
+			if sse_replay_buffers.has (a_room_id) and then attached sse_replay_buffers.item (a_room_id) as rl then
+				across
+					rl as item_ic
+				loop
+					if item_ic.seq > a_last_seq then
+						msg_h := item_ic.msg
+						{VR_REACTOR_BRIDGE}.c_ws_msg_ref (msg_h)
+						dispatch_sse_replay_publish (a_worker, a_fd, msg_h)
+					end
+				end
+			end
+		end
+
 	shutdown
 			-- Mark broker terminated during reactor teardown barrier.
+		local
+			dropped: TUPLE [seq: NATURAL_64; msg: POINTER]
 		do
 			is_shutdown := True
+			across sse_replay_buffers as buf_ic loop
+				from
+				until
+					buf_ic.is_empty
+				loop
+					dropped := buf_ic.first
+					buf_ic.start
+					buf_ic.remove
+					{VR_REACTOR_BRIDGE}.c_ws_msg_unref (dropped.msg)
+				end
+			end
+			sse_replay_buffers.wipe_out
 		ensure
 			shutdown_set: is_shutdown
 		end
@@ -284,5 +340,14 @@ feature {NONE} -- Implementation
 		do
 			a_worker.on_sse_room_publish (a_room_id, a_msg_handle)
 		end
+
+	dispatch_sse_replay_publish (a_worker: separate VR_WORKER; a_fd: INTEGER; a_msg_handle: POINTER)
+			-- Asynchronous command passing replayed SSE message to worker.
+		do
+			a_worker.on_sse_replay_publish (a_fd, a_msg_handle)
+		end
+
+	sse_replay_buffers: HASH_TABLE [ARRAYED_LIST [TUPLE [seq: NATURAL_64; msg: POINTER]], INTEGER]
+			-- Per-room bounded ring buffer of historical SSE messages for Last-Event-ID resumption
 
 end

@@ -2,7 +2,7 @@
 
 A **high-concurrency networking backend for Eiffel** that combines:
 
-- A **thin C reactor** using modern OS facilities (`epoll` on Linux, `kqueue` on BSD/macOS, `IOCP` on Windows) for efficient non-blocking I/O.
+- A **thin C reactor** using Linux `epoll` (with `kqueue` and `IOCP` planned for future multi-platform expansion) for efficient edge-triggered non-blocking I/O.
 - **SCOOP** for safe, concurrent application logic and connection handlers (asynchronous separate calls, Design by Contract, no data races).
 
 ## Architecture

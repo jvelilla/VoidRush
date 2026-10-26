@@ -1,0 +1,34 @@
+name: VoidRush CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  native-tests:
+    name: Native C Reactor Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and Run Native C Unit Tests
+        run: |
+          make -C native clean
+          make -C native test
+
+  eiffel-tests:
+    name: EiffelStudio Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Eiffel Compilation Docker Image
+        run: |
+          docker build -t voidrush/tool-eiffel-compilation docker/images/tools/eiffel-compilation
+
+      - name: Run Test Suite in Docker
+        run: |
+          mkdir -p docker/_build
+          docker run --rm -v "${{ github.workspace }}:/opt/eiffel/src" -v "${{ github.workspace }}/docker/_build:/opt/eiffel/build" voidrush/tool-eiffel-compilation /opt/eiffel/src/docker/images/tools/eiffel-compilation/files/bin/main test

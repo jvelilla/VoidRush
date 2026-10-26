@@ -13,6 +13,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/resource.h>
 
 #define VR_MAX_INTERNAL_EVENTS 2048
 
@@ -49,6 +50,9 @@ struct vr_reactor {
     /* Performance Remediation: live connection count per worker (least-connections) */
     uint32_t worker_conns[VR_MAX_WORKERS];
 
+    /* Phase 8 Room Sequence Numbers for SSE and Pub/Sub */
+    uint64_t room_seq[VR_MAX_ROOMS];
+
     struct epoll_event raw_events[VR_MAX_INTERNAL_EVENTS];
 };
 
@@ -71,6 +75,13 @@ static uint32_t from_epoll_flags(uint32_t ep) {
 vr_reactor_t *vr_reactor_create(void) {
     /* Prevent broken client pipes from killing the Eiffel runtime */
     signal(SIGPIPE, SIG_IGN);
+
+    /* Raise RLIMIT_NOFILE to maximum allowed soft/hard limit */
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rl.rlim_cur = rl.rlim_max;
+        setrlimit(RLIMIT_NOFILE, &rl);
+    }
 
     vr_reactor_t *r = (vr_reactor_t *)calloc(1, sizeof(vr_reactor_t));
     if (!r) return NULL;
@@ -229,6 +240,22 @@ int vr_reactor_accept_nonblocking(int listen_fd) {
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return VR_REACTOR_IO_WOULD_BLOCK; /* Queue drained */
+        }
+        if (errno == EMFILE || errno == ENFILE) {
+            /* Drain pending connection via spare file descriptor to prevent epoll busy-loop */
+            static __thread int spare_fd = -1;
+            if (spare_fd < 0) {
+                spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            }
+            if (spare_fd >= 0) {
+                close(spare_fd);
+                int client = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                if (client >= 0) {
+                    close(client);
+                }
+                spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            }
+            return VR_REACTOR_IO_WOULD_BLOCK;
         }
         return VR_REACTOR_IO_ERROR; /* Fatal error */
     }
@@ -525,10 +552,11 @@ int vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id) {
     if (!r || worker_id < 0 || worker_id >= VR_MAX_WORKERS) return 0;
     int purged = 0;
     for (int fd = 0; fd < VR_MAX_TRACKED_FDS; fd++) {
-        if (__atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE) == (int16_t)worker_id) {
+        int16_t expected = (int16_t)worker_id;
+        if (__atomic_compare_exchange_n(&r->fd_owner[fd], &expected, (int16_t)-1,
+                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
             close(fd);
-            __atomic_store_n(&r->fd_owner[fd], (int16_t)-1, __ATOMIC_RELEASE);
             if (r->active_connections > 0) {
                 __atomic_sub_fetch(&r->active_connections, 1, __ATOMIC_RELAXED);
             }
@@ -540,10 +568,32 @@ int vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id) {
     return purged;
 }
 
+int vr_reactor_close_fd_for_worker(vr_reactor_t *r, int fd, int worker_id) {
+    if (!r || fd < 0) return -1;
+    if (fd < VR_MAX_TRACKED_FDS) {
+        int16_t expected = (int16_t)worker_id;
+        /* Atomically verify ownership and clear it before closing */
+        if (!__atomic_compare_exchange_n(&r->fd_owner[fd], &expected, (int16_t)-1,
+                                         0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* fd was already purged or re-assigned to another worker! Do NOT close! */
+            return -1;
+        }
+    }
+    epoll_ctl(r->epfd, EPOLL_CTL_DEL, fd, NULL);
+    return close(fd);
+}
+
 /* Performance Remediation: Least-Connections Worker Assignment */
 int vr_reactor_assign_worker(vr_reactor_t *r, int fd, int worker_count) {
     if (!r || worker_count <= 0) return 0;
     if (worker_count > VR_MAX_WORKERS) worker_count = VR_MAX_WORKERS;
+
+    if (fd >= VR_MAX_TRACKED_FDS) {
+        /* Untracked fallback: deterministic modulo routing matching route_fd */
+        int w = fd % worker_count;
+        __atomic_add_fetch(&r->worker_conns[w], 1U, __ATOMIC_ACQ_REL);
+        return w;
+    }
 
     int best = 0;
     uint32_t best_load = __atomic_load_n(&r->worker_conns[0], __ATOMIC_ACQUIRE);
@@ -555,7 +605,7 @@ int vr_reactor_assign_worker(vr_reactor_t *r, int fd, int worker_count) {
         }
     }
     __atomic_add_fetch(&r->worker_conns[best], 1U, __ATOMIC_ACQ_REL);
-    if (fd >= 0 && fd < VR_MAX_TRACKED_FDS) {
+    if (fd >= 0) {
         __atomic_store_n(&r->fd_owner[fd], (int16_t)best, __ATOMIC_RELEASE);
     }
     return best;
@@ -564,7 +614,7 @@ int vr_reactor_assign_worker(vr_reactor_t *r, int fd, int worker_count) {
 int vr_reactor_route_fd(const vr_reactor_t *r, int fd, int worker_count) {
     if (!r || fd < 0 || worker_count <= 0) return -1;
     if (fd >= VR_MAX_TRACKED_FDS) {
-        /* Untracked FD range: deterministic modulo fallback (matches assign path below) */
+        /* Untracked FD range: deterministic modulo fallback (matches assign_worker) */
         return fd % worker_count;
     }
     int16_t owner = __atomic_load_n(&r->fd_owner[fd], __ATOMIC_ACQUIRE);
@@ -597,5 +647,11 @@ void vr_reactor_metric_inc_restarts(vr_reactor_t *r) {
 void vr_reactor_metric_inc_isolated_faults(vr_reactor_t *r) {
     if (!r) return;
     __atomic_fetch_add(&r->supervisor_isolated_faults_total, 1, __ATOMIC_RELAXED);
+}
+
+uint64_t vr_reactor_next_room_seq(vr_reactor_t *r, int room_id) {
+    if (!r || room_id < 0) return 0;
+    uint32_t rid = (uint32_t)room_id % VR_MAX_ROOMS;
+    return __atomic_add_fetch(&r->room_seq[rid], 1, __ATOMIC_RELAXED);
 }
 

@@ -60,6 +60,9 @@ feature -- Fairness Budgets & Flow Control
 	Scratch_buffer_size: INTEGER = 16384
 			-- 16 KiB scratch read chunk
 
+	Initial_connection_buffer_size: INTEGER = 4096
+			-- 4 KiB initial lazy buffer size per connection (resizes on demand)
+
 	Idle_timeout_ms: NATURAL_64 = 60000
 			-- 60 seconds of inactivity triggers close
 
@@ -107,6 +110,7 @@ feature -- WebSocket Status Codes (RFC 6455 §7.4.1)
 	Ws_close_going_away: NATURAL_16 = 1001
 	Ws_close_protocol_error: NATURAL_16 = 1002
 	Ws_close_unsupported_data: NATURAL_16 = 1003
+	Ws_close_bad_payload: NATURAL_16 = 1007
 	Ws_close_message_too_big: NATURAL_16 = 1009
 	Ws_close_internal_error: NATURAL_16 = 1011
 
@@ -200,8 +204,8 @@ feature -- Phase 7 Child Lifecycle States
 
 feature -- Phase 7 Supervision Limits & Timeouts
 
-	Max_workers: INTEGER = 64
-			-- Maximum number of worker shards supported by C control block
+	Max_workers: INTEGER = 63
+			-- Maximum number of worker shards supported by C control block (bits 0..62; bit 63 is broker)
 
 	Default_max_restarts: INTEGER = 3
 			-- Maximum restarts within intensity window before fatal exit

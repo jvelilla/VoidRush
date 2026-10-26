@@ -252,6 +252,28 @@ feature {NONE} -- Tests
 			check keep_alive: parser.is_keep_alive end
 			check host_set: parser.host_slice.same_as_string (buf, "localhost") end
 			check consumed_correct: parser.header_bytes_consumed = req.count end
+			check default_room: parser.query_room_id (buf) = 0 end
+
+			-- Query Room Parsing
+			parser.reset
+			req := "GET /events?room=42 HTTP/1.1%R%NHost: localhost%R%N%R%N"
+			create buf.make (req.count)
+			across 1 |..| req.count as ic loop
+				buf.put_character (req.item (ic), ic - 1)
+			end
+			ok := parser.try_parse_request_header (buf, 0, req.count)
+			check ok_42: ok end
+			check room_42: parser.query_room_id (buf) = 42 end
+
+			parser.reset
+			req := "GET /ws?foo=bar&room=999&x=1 HTTP/1.1%R%NHost: localhost%R%N%R%N"
+			create buf.make (req.count)
+			across 1 |..| req.count as ic loop
+				buf.put_character (req.item (ic), ic - 1)
+			end
+			ok := parser.try_parse_request_header (buf, 0, req.count)
+			check ok_999: ok end
+			check room_999: parser.query_room_id (buf) = 999 end
 		end
 
 	test_proxy_v2
@@ -324,6 +346,8 @@ feature {NONE} -- Tests
 			m: VR_METRICS
 		do
 			create engine.make (Test_port + 1, 4)
+			engine.set_bind_host ("127.0.0.1")
+			engine.enable_proxy_protocol_v2
 			engine.start
 			check port_ok: engine.port = Test_port + 1 end
 			check workers_ok: engine.worker_count = 4 end

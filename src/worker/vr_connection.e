@@ -60,13 +60,15 @@ feature {NONE} -- Initialization
 			paused_in := False
 			armed_flags := 0
 
-			create in_buf.make (Scratch_buffer_size)
+			create in_buf.make (Initial_connection_buffer_size)
 			in_read_offset := 0
 			in_write_offset := 0
 
-			create out_buf.make (Scratch_buffer_size)
+			create out_buf.make (Initial_connection_buffer_size)
 			out_read_offset := 0
 			out_write_offset := 0
+
+			create ws_hdr_buf.make (10)
 
 			create http_parser.make
 			create proxy_parser.make
@@ -139,6 +141,9 @@ feature -- Access
 	frag_opcode: INTEGER
 			-- In-progress fragmented data frame opcode (0x1 text or 0x2 binary)
 
+	ws_hdr_buf: MANAGED_POINTER
+			-- Preallocated reusable 10-byte header buffer for WebSocket outbound frames
+
 	rooms: ARRAYED_SET [INTEGER]
 			-- Room subscriptions for this connection
 
@@ -157,8 +162,8 @@ feature -- Access
 	sse_broadcast_handler: detachable PROCEDURE [INTEGER, POINTER, INTEGER]
 			-- Callback into worker to broadcast SSE message across workers (room, ptr, len)
 
-	sse_room_join_handler: detachable PROCEDURE [INTEGER, INTEGER]
-			-- Callback into worker when socket joins an SSE room (fd, room)
+	sse_room_join_handler: detachable PROCEDURE [INTEGER, INTEGER, detachable STRING_8]
+			-- Callback into worker when socket joins an SSE room (fd, room, last_event_id)
 
 	reactor_handle: POINTER
 			-- Native reactor handle for atomic metrics updates
@@ -337,7 +342,7 @@ feature -- State Modifiers
 			handler_set: sse_broadcast_handler = a_handler
 		end
 
-	set_sse_room_join_handler (a_handler: PROCEDURE [INTEGER, INTEGER])
+	set_sse_room_join_handler (a_handler: PROCEDURE [INTEGER, INTEGER, detachable STRING_8])
 			-- Set worker callback for SSE room joining.
 		require
 			valid_handler: a_handler /= Void
@@ -357,10 +362,11 @@ feature -- State Modifiers
 			time_set: last_sse_heartbeat_ms = a_time
 		end
 
-	start_sse (a_last_event_id: detachable STRING_8; a_now_ms: NATURAL_64)
+	start_sse (a_room_id: INTEGER; a_last_event_id: detachable STRING_8; a_now_ms: NATURAL_64)
 			-- Transition connection to Proto_sse_open and queue 200 OK headers.
 		require
 			is_open: is_open
+			valid_room: a_room_id >= 0
 			valid_time: a_now_ms > 0
 		do
 			proto_state := Proto_sse_open
@@ -371,8 +377,9 @@ feature -- State Modifiers
 				create last_sse_event_id.make_empty
 			end
 			append_outbound_string (Sse_handshake_headers)
+			rooms.extend (a_room_id)
 			if attached sse_room_join_handler as sjh then
-				sjh.call ([fd, Room_default])
+				sjh.call ([fd, a_room_id, a_last_event_id])
 			end
 			if reactor_handle /= default_pointer then
 				{VR_REACTOR_BRIDGE}.c_metric_inc_sse_streams (reactor_handle)
@@ -546,7 +553,19 @@ feature {NONE} -- Inbound Protocol Pipeline
 							in_write_offset := 0
 						end
 
-						if http_parser.is_upgrade_websocket or http_parser.is_connection_upgrade then
+						if http_parser.has_transfer_encoding then
+							append_error_response (501, "Not Implemented")
+							mark_closing
+							done := True
+						elseif http_parser.is_content_length_invalid then
+							append_error_response (400, "Bad Request")
+							mark_closing
+							done := True
+						elseif http_parser.content_length > Default_body_limit then
+							append_error_response (413, "Payload Too Large")
+							mark_closing
+							done := True
+						elseif http_parser.is_upgrade_websocket or http_parser.is_connection_upgrade then
 							process_websocket_upgrade (a_now_ms)
 							if proto_state = Proto_ws_open and in_buf_bytes > 0 then
 								-- CRITICAL TRAP D FIX: Process pipelined WebSocket frames immediately!
@@ -574,19 +593,24 @@ feature {NONE} -- Inbound Protocol Pipeline
 								end
 							end
 						else
-							handle_http_request (a_now_ms)
-
-							if not http_parser.is_keep_alive then
-								mark_closing
-								done := True
-							else
-								-- Reset Slowloris deadline for next pipelined request
-								if in_buf_bytes = 0 then
-									request_started_ms := 0
+							if http_parser.content_length > 0 then
+								if in_buf_bytes < http_parser.content_length then
+									proto_state := Proto_http_reading_body
+									done := True
 								else
-									request_started_ms := a_now_ms
+									drain_http_body
+									handle_http_request (a_now_ms)
+									finish_http_request (a_now_ms)
+									if not http_parser.is_keep_alive then
+										done := True
+									end
 								end
-								http_parser.reset
+							else
+								handle_http_request (a_now_ms)
+								finish_http_request (a_now_ms)
+								if not http_parser.is_keep_alive then
+									done := True
+								end
 							end
 						end
 					else
@@ -599,7 +623,16 @@ feature {NONE} -- Inbound Protocol Pipeline
 					end
 				elseif proto_state = Proto_http_reading_body then
 					if in_buf_bytes >= http_parser.content_length then
-						process_http_body (a_now_ms)
+						if http_parser.is_sse_publish_request (in_buf) then
+							process_http_body (a_now_ms)
+						else
+							drain_http_body
+							handle_http_request (a_now_ms)
+							finish_http_request (a_now_ms)
+							if not http_parser.is_keep_alive then
+								done := True
+							end
+						end
 					else
 						done := True
 					end
@@ -621,20 +654,22 @@ feature {NONE} -- Inbound Protocol Pipeline
 			-- Establish WHATWG Server-Sent Events stream.
 		local
 			lid: STRING_8
+			target_room: INTEGER
 		do
 			if not http_parser.last_event_id_slice.is_empty then
 				lid := http_parser.last_event_id_slice.to_string_8 (in_buf)
 			else
 				create lid.make_empty
 			end
-			start_sse (lid, a_now_ms)
+			target_room := http_parser.query_room_id (in_buf)
+			start_sse (target_room, lid, a_now_ms)
 		end
 
 	process_http_body (a_now_ms: NATURAL_64)
 			-- Process request body for POST endpoints (e.g. POST /events publish).
 		local
 			body_ptr: POINTER
-			body_len: INTEGER
+			body_len, target_room: INTEGER
 		do
 			body_len := http_parser.content_length
 			body_ptr := in_buf.item + in_read_offset
@@ -644,11 +679,41 @@ feature {NONE} -- Inbound Protocol Pipeline
 				in_write_offset := 0
 			end
 
+			target_room := http_parser.query_room_id (in_buf)
 			if attached sse_broadcast_handler as sbh then
-				sbh.call ([Room_default, body_ptr, body_len])
+				sbh.call ([target_room, body_ptr, body_len])
 			end
 
 			append_outbound_string (Sse_accepted_post_response)
+			if not http_parser.is_keep_alive then
+				mark_closing
+			else
+				proto_state := Proto_http_reading_headers
+				if in_buf_bytes = 0 then
+					request_started_ms := 0
+				else
+					request_started_ms := a_now_ms
+				end
+				http_parser.reset
+			end
+		end
+
+	drain_http_body
+			-- Consume request body bytes from inbound buffer for standard endpoints.
+		local
+			body_len: INTEGER
+		do
+			body_len := http_parser.content_length
+			in_read_offset := in_read_offset + body_len
+			if in_read_offset = in_write_offset then
+				in_read_offset := 0
+				in_write_offset := 0
+			end
+		end
+
+	finish_http_request (a_now_ms: NATURAL_64)
+			-- Finalize keep-alive or close after standard HTTP request.
+		do
 			if not http_parser.is_keep_alive then
 				mark_closing
 			else
@@ -666,7 +731,7 @@ feature {NONE} -- Inbound Protocol Pipeline
 			-- Validate WebSocket upgrade request, compute accept key, and transition to Proto_ws_open.
 		local
 			accept_buf: MANAGED_POINTER
-			res, i, key_offset: INTEGER
+			res, i, key_offset, target_room: INTEGER
 			resp: STRING_8
 		do
 			if http_parser.is_websocket_upgrade_request then
@@ -687,11 +752,12 @@ feature {NONE} -- Inbound Protocol Pipeline
 					resp.append ("%R%N%R%N")
 					append_outbound_string (resp)
 
+					target_room := http_parser.query_room_id (in_buf)
 					proto_state := Proto_ws_open
 					request_started_ms := 0
-					rooms.extend (Room_default)
+					rooms.extend (target_room)
 					if attached room_join_handler as h then
-						h.call ([fd, Room_default])
+						h.call ([fd, target_room])
 					end
 					if reactor_handle /= default_pointer then
 						{VR_REACTOR_BRIDGE}.c_metric_inc_ws_upgrades (reactor_handle)
@@ -770,7 +836,12 @@ feature {NONE} -- Inbound Protocol Pipeline
 						mark_closing
 					elseif ws_parser.is_fin then
 						if attached frag_buf as fb then
-							on_ws_message (fb.item, frag_bytes, frag_opcode)
+							if frag_opcode = Ws_opcode_text and then not {VR_REACTOR_BRIDGE}.c_ws_is_valid_utf8 (fb.item, frag_bytes) then
+								send_ws_close_frame (Ws_close_bad_payload)
+								mark_closing
+							else
+								on_ws_message (fb.item, frag_bytes, frag_opcode)
+							end
 						end
 						frag_bytes := 0
 					end
@@ -781,21 +852,23 @@ feature {NONE} -- Inbound Protocol Pipeline
 	on_ws_message (a_data: POINTER; a_len, a_opcode: INTEGER)
 			-- Handle complete application WebSocket frame (echo or broadcast).
 		local
-			hdr: MANAGED_POINTER
-			hdr_len: INTEGER
-			is_pub, is_pub_sse: BOOLEAN
+			hdr_len, target_room, payload_offset: INTEGER
+			parsed_pub, parsed_sse: NATURAL_64
 		do
-			is_pub := {VR_REACTOR_BRIDGE}.c_has_pub_prefix (a_data, a_len)
-			is_pub_sse := {VR_REACTOR_BRIDGE}.c_has_pub_sse_prefix (a_data, a_len)
-			if is_pub and attached broadcast_handler as bh then
-				bh.call ([Room_default, a_opcode, a_data + 4, a_len - 4])
-			elseif is_pub_sse and attached sse_broadcast_handler as sbh then
-				sbh.call ([Room_default, a_data + 8, a_len - 8])
+			parsed_pub := {VR_REACTOR_BRIDGE}.c_ws_parse_pub (a_data, a_len, False)
+			parsed_sse := {VR_REACTOR_BRIDGE}.c_ws_parse_pub (a_data, a_len, True)
+			if parsed_pub > 0 and attached broadcast_handler as bh then
+				target_room := (parsed_pub |>> 32).to_integer_32
+				payload_offset := (parsed_pub & 0xFFFFFFFF).to_integer_32
+				bh.call ([target_room, a_opcode, a_data + payload_offset, a_len - payload_offset])
+			elseif parsed_sse > 0 and attached sse_broadcast_handler as sbh then
+				target_room := (parsed_sse |>> 32).to_integer_32
+				payload_offset := (parsed_sse & 0xFFFFFFFF).to_integer_32
+				sbh.call ([target_room, a_data + payload_offset, a_len - payload_offset])
 			else
-				-- Echo frame back to client
-				create hdr.make (10)
-				hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | a_opcode).to_natural_8, a_len, hdr.item)
-				append_outbound (hdr.item, hdr_len)
+				-- Echo frame back to client without allocations
+				hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | a_opcode).to_natural_8, a_len, ws_hdr_buf.item)
+				append_outbound (ws_hdr_buf.item, hdr_len)
 				if a_len > 0 then
 					append_outbound (a_data, a_len)
 				end
@@ -808,12 +881,10 @@ feature {NONE} -- Inbound Protocol Pipeline
 	send_ws_pong_frame (a_payload: POINTER; a_len: INTEGER)
 			-- Transmit unmasked Pong frame echoing received Ping payload.
 		local
-			hdr: MANAGED_POINTER
 			hdr_len: INTEGER
 		do
-			create hdr.make (10)
-			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_pong).to_natural_8, a_len, hdr.item)
-			append_outbound (hdr.item, hdr_len)
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_pong).to_natural_8, a_len, ws_hdr_buf.item)
+			append_outbound (ws_hdr_buf.item, hdr_len)
 			if a_len > 0 then
 				append_outbound (a_payload, a_len)
 			end
@@ -823,18 +894,13 @@ feature {NONE} -- Inbound Protocol Pipeline
 		end
 
 	send_ws_close_frame (a_code: NATURAL_16)
-			-- Transmit unmasked Close frame with status code.
+			-- Transmit unmasked Close frame with status code (zero heap allocation).
 		local
-			hdr: MANAGED_POINTER
-			body: MANAGED_POINTER
 			hdr_len: INTEGER
 		do
-			create hdr.make (10)
-			create body.make (2)
-			body.put_natural_16_be (a_code, 0)
-			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_close).to_natural_8, 2, hdr.item)
-			append_outbound (hdr.item, hdr_len)
-			append_outbound (body.item, 2)
+			hdr_len := {VR_REACTOR_BRIDGE}.c_ws_encode_frame_header ((0x80 | Ws_opcode_close).to_natural_8, 2, ws_hdr_buf.item)
+			ws_hdr_buf.put_natural_16_be (a_code, hdr_len)
+			append_outbound (ws_hdr_buf.item, hdr_len + 2)
 			proto_state := Proto_ws_closing
 			if reactor_handle /= default_pointer then
 				{VR_REACTOR_BRIDGE}.c_metric_inc_ws_frames_out (reactor_handle)
@@ -902,21 +968,9 @@ feature {NONE} -- Inbound Protocol Pipeline
 	append_dashboard_html_response
 			-- Serve Web Dashboard HTML client.
 		local
-			f: PLAIN_TEXT_FILE
 			resp, html: STRING_8
 		do
-			create f.make_with_name ("example/web/index.html")
-			if not f.exists then
-				create f.make_with_name ("/opt/eiffel/src/example/web/index.html")
-			end
-			if f.exists and then f.is_readable then
-				f.open_read
-				f.read_stream (f.count)
-				html := f.last_string
-				f.close
-			else
-				html := "<!DOCTYPE html><html><body><h1>VoidRush Telemetry Gateway</h1><p>Visit /events or /metrics.</p></body></html>"
-			end
+			html := cached_dashboard_html
 			create resp.make (256 + html.count)
 			resp.append ("HTTP/1.1 200 OK%R%NContent-Type: text/html; charset=utf-8%R%NAccess-Control-Allow-Origin: *%R%NContent-Length: ")
 			resp.append (html.count.out)
@@ -927,6 +981,30 @@ feature {NONE} -- Inbound Protocol Pipeline
 			end
 			resp.append (html)
 			append_outbound_string (resp)
+		end
+
+	cached_dashboard_html: STRING_8
+			-- In-memory cached dashboard HTML payload.
+		once
+			Result := load_dashboard_html
+		end
+
+	load_dashboard_html: STRING_8
+		local
+			f: PLAIN_TEXT_FILE
+		do
+			create f.make_with_name ("example/web/index.html")
+			if not f.exists then
+				create f.make_with_name ("/opt/eiffel/src/example/web/index.html")
+			end
+			if f.exists and then f.is_readable then
+				f.open_read
+				f.read_stream (f.count)
+				Result := f.last_string.twin
+				f.close
+			else
+				Result := "<!DOCTYPE html><html><body><h1>VoidRush Telemetry Gateway</h1><p>Visit /events or /metrics.</p></body></html>"
+			end
 		end
 
 	handle_debug_fault

@@ -59,7 +59,8 @@ feature -- Parsing Execution
 		local
 			b0, b1, rsv, len7: NATURAL_8
 			hdr_size, mask_offset, payload_len: INTEGER
-			is_masked: BOOLEAN
+			len64: NATURAL_64
+			is_masked, is_too_big: BOOLEAN
 		do
 			if a_available < 2 then
 				Result := 0 -- Need more bytes for basic 2-byte header
@@ -104,13 +105,21 @@ feature -- Parsing Execution
 					else -- len7 = 127
 						hdr_size := 14 -- 2 + 8 bytes len + 4 bytes mask
 						if a_available >= 10 then
-							payload_len := a_buf.read_natural_64_be (a_offset + 2).to_integer_32
+							len64 := a_buf.read_natural_64_be (a_offset + 2)
+							if len64 > Max_ws_message_size.to_natural_64 then
+								is_too_big := True
+								payload_len := -1
+							else
+								payload_len := len64.to_integer_32
+							end
 						else
 							payload_len := -1 -- Need more bytes
 						end
 					end
 
-					if payload_len < 0 or else a_available < hdr_size then
+					if is_too_big then
+						Result := -1009 -- Message Too Big
+					elseif payload_len < 0 or else a_available < hdr_size then
 						Result := 0 -- Wait for complete extended length header
 					elseif payload_len > Max_ws_message_size then
 						Result := -1009 -- Message Too Big
@@ -130,16 +139,22 @@ feature -- Parsing Execution
 							)
 						end
 
-						-- Extract status code if Close frame
-						if last_opcode = Ws_opcode_close then
-							if payload_len >= 2 then
-								close_status_code := a_buf.read_natural_16_be (last_payload_offset)
-							else
-								close_status_code := Ws_close_normal
+						-- UTF-8 validation for text frames
+						if last_opcode = Ws_opcode_text and then payload_len > 0 and then
+						   not {VR_REACTOR_BRIDGE}.c_ws_is_valid_utf8 (a_buf.item + last_payload_offset, payload_len) then
+							Result := -1007 -- Invalid Frame Payload Data (bad UTF-8)
+						else
+							-- Extract status code if Close frame
+							if last_opcode = Ws_opcode_close then
+								if payload_len >= 2 then
+									close_status_code := a_buf.read_natural_16_be (last_payload_offset)
+								else
+									close_status_code := Ws_close_normal
+								end
 							end
-						end
 
-						Result := hdr_size + payload_len
+							Result := hdr_size + payload_len
+						end
 					end
 				end
 			end

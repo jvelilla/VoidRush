@@ -503,14 +503,15 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			end
 		end
 
-	join_sse_room (a_fd, a_room_id: INTEGER)
-			-- Subscribe connection `a_fd` to local SSE `a_room_id`.
+	join_sse_room (a_fd, a_room_id: INTEGER; a_last_event_id: detachable STRING_8)
+			-- Subscribe connection `a_fd` to local SSE `a_room_id` and trigger replay if Last-Event-ID is present.
 		require
 			valid_fd: a_fd >= 0
 			valid_room: a_room_id >= 0
 		local
 			set: HASH_TABLE [BOOLEAN, INTEGER]
 			was_first: BOOLEAN
+			last_seq: NATURAL_64
 		do
 			sse_active_fds.force (True, a_fd)
 			if not sse_rooms.has (a_room_id) then
@@ -529,6 +530,10 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			end
 			if was_first then
 				dispatch_broker_update_sse_room (broker, a_room_id, worker_id, True)
+			end
+			if attached a_last_event_id as lid and then not lid.is_empty and then lid.is_natural_64 then
+				last_seq := lid.to_natural_64
+				dispatch_broker_replay_sse (broker, Current, a_fd, a_room_id, last_seq)
 			end
 		ensure
 			room_has_fd: attached sse_rooms.item (a_room_id) as s and then s.has (a_fd)
@@ -565,31 +570,48 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 		local
 			msg_ptr: POINTER
 			c_id, c_ev, c_dt: ANY
+			seq: NATURAL_64
+			final_id: STRING_8
 		do
-			c_id := a_id.to_c
+			if a_id /= Void and then not a_id.is_empty then
+				final_id := a_id
+				if a_id.is_natural_64 then
+					seq := a_id.to_natural_64
+				else
+					seq := {VR_REACTOR_BRIDGE}.c_reactor_next_room_seq (reactor_handle, a_room_id)
+				end
+			else
+				seq := {VR_REACTOR_BRIDGE}.c_reactor_next_room_seq (reactor_handle, a_room_id)
+				final_id := seq.out
+			end
+			c_id := final_id.to_c
 			c_ev := a_event.to_c
 			c_dt := a_data.to_c
-			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, a_id.count, $c_ev, a_event.count, $c_dt, a_data.count, total_workers)
+			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, final_id.count, $c_ev, a_event.count, $c_dt, a_data.count, total_workers)
 			if msg_ptr /= default_pointer then
-				dispatch_broker_publish_sse (broker, a_room_id, msg_ptr)
+				dispatch_broker_publish_sse (broker, a_room_id, seq, msg_ptr)
 			end
 		end
 
 	publish_sse_broadcast_from_slice (a_room_id: INTEGER; a_payload: POINTER; a_len: INTEGER)
-			-- Format SSE message from raw memory slice and dispatch to broker.
+			-- Format SSE message from raw memory slice with monotonic sequence ID and dispatch to broker.
 		require
 			valid_room: a_room_id >= 0
 			valid_len: a_len >= 0
 		local
 			msg_ptr: POINTER
-			c_empty: ANY
-			empty_str: STRING_8
+			c_empty, c_id: ANY
+			empty_str, id_str: STRING_8
+			seq: NATURAL_64
 		do
 			empty_str := ""
 			c_empty := empty_str.to_c
-			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_empty, 0, $c_empty, 0, a_payload, a_len, total_workers)
+			seq := {VR_REACTOR_BRIDGE}.c_reactor_next_room_seq (reactor_handle, a_room_id)
+			id_str := seq.out
+			c_id := id_str.to_c
+			msg_ptr := {VR_REACTOR_BRIDGE}.c_sse_msg_create ($c_id, id_str.count, $c_empty, 0, a_payload, a_len, total_workers)
 			if msg_ptr /= default_pointer then
-				dispatch_broker_publish_sse (broker, a_room_id, msg_ptr)
+				dispatch_broker_publish_sse (broker, a_room_id, seq, msg_ptr)
 			end
 		end
 
@@ -625,6 +647,25 @@ feature -- Room & Pub/Sub Management (Worker-Local & Fast-Path)
 			end
 		end
 
+	on_sse_replay_publish (a_fd: INTEGER; a_msg_handle: POINTER)
+			-- Deliver replayed SSE event to targeted connection and release buffer.
+		require
+			valid_fd: a_fd >= 0
+			valid_msg: a_msg_handle /= default_pointer
+		local
+			data_ptr: POINTER
+			total_len: INTEGER
+		do
+			if attached connections.item (a_fd) as conn and then conn.proto_state = Proto_sse_open then
+				data_ptr := {VR_REACTOR_BRIDGE}.c_ws_msg_data (a_msg_handle)
+				total_len := {VR_REACTOR_BRIDGE}.c_ws_msg_size (a_msg_handle)
+				deliver_frame_to_connection (conn, data_ptr, total_len)
+			end
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+		rescue
+			{VR_REACTOR_BRIDGE}.c_ws_msg_unref (a_msg_handle)
+		end
+
 feature {NONE} -- Epoll Interest Hysteresis
 
 	sync_interest (a_conn: VR_CONNECTION)
@@ -654,10 +695,16 @@ feature {NONE} -- SCOOP Broker Dispatch
 			a_broker.publish (a_room_id, a_msg_ptr)
 		end
 
-	dispatch_broker_publish_sse (a_broker: separate VR_BROKER; a_room_id: INTEGER; a_msg_ptr: POINTER)
+	dispatch_broker_publish_sse (a_broker: separate VR_BROKER; a_room_id: INTEGER; a_seq: NATURAL_64; a_msg_ptr: POINTER)
 			-- Asynchronous command to controlled separate broker for SSE.
 		do
-			a_broker.publish_sse (a_room_id, a_msg_ptr)
+			a_broker.publish_sse (a_room_id, a_seq, a_msg_ptr)
+		end
+
+	dispatch_broker_replay_sse (a_broker: separate VR_BROKER; a_worker: separate VR_WORKER; a_fd, a_room_id: INTEGER; a_last_seq: NATURAL_64)
+			-- Asynchronous command requesting replay from separate broker.
+		do
+			a_broker.replay_sse_for_worker (a_worker, a_fd, a_room_id, a_last_seq)
 		end
 
 	dispatch_broker_update_ws_room (a_broker: separate VR_BROKER; a_room_id, a_worker_id: INTEGER; a_has: BOOLEAN)
@@ -715,9 +762,11 @@ feature {NONE} -- Implementation
 				conn.mark_closed
 				connections.remove (a_fd)
 				{VR_REACTOR_BRIDGE}.c_reactor_release_worker_conn (reactor_handle, worker_id)
-				{VR_REACTOR_BRIDGE}.c_reactor_set_fd_owner (reactor_handle, a_fd, -1)
-				res := {VR_REACTOR_BRIDGE}.c_reactor_del (reactor_handle, a_fd)
-				res := {VR_REACTOR_BRIDGE}.c_close (a_fd)
+				if reactor_handle /= default_pointer then
+					res := {VR_REACTOR_BRIDGE}.c_reactor_close_fd_for_worker (reactor_handle, a_fd, worker_id)
+				else
+					res := {VR_REACTOR_BRIDGE}.c_close (a_fd)
+				end
 				{VR_REACTOR_BRIDGE}.c_metric_dec_open (reactor_handle)
 			end
 		ensure

@@ -145,6 +145,30 @@ feature -- Configuration
 			window_set: intensity.window_ms = a_window_ms
 		end
 
+	bind_host: detachable STRING_8
+			-- Configured bind IP or hostname (Void / default binds 0.0.0.0)
+
+	is_proxy_protocol_v2_enabled: BOOLEAN
+			-- Should worker connections await HAProxy PROXY v2 preface?
+
+	set_bind_host (a_host: STRING_8)
+			-- Configure listening bind IP or hostname.
+		require
+			valid_host: a_host /= Void and then not a_host.is_empty
+		do
+			bind_host := a_host.twin
+		ensure
+			host_set: attached bind_host as h and then h.same_string (a_host)
+		end
+
+	enable_proxy_protocol_v2
+			-- Enable PROXY v2 parsing on inbound client connections.
+		do
+			is_proxy_protocol_v2_enabled := True
+		ensure
+			proxy_v2_enabled: is_proxy_protocol_v2_enabled
+		end
+
 feature -- Lifecycle Coordination
 
 	start_all
@@ -168,7 +192,11 @@ feature -- Lifecycle Coordination
 			set_child_state ("broker", State_running)
 
 			-- 3. Construct Reactor
-			create r.make_with_components (port, reactor_handle, worker_count, b)
+			if attached bind_host as bh then
+				create r.make_with_host (bh, port, reactor_handle, worker_count, b)
+			else
+				create r.make_with_components (port, reactor_handle, worker_count, b)
+			end
 			reactor := r
 			set_child_state ("reactor", State_running)
 
@@ -180,6 +208,9 @@ feature -- Lifecycle Coordination
 				i >= worker_count
 			loop
 				create w.make (i, reactor_handle, b, worker_count)
+				if is_proxy_protocol_v2_enabled then
+					dispatch_worker_set_protocol (w, Proto_awaiting_proxy_v2)
+				end
 				workers.extend (w)
 				dispatch_register_worker (b, w)
 				dispatch_register_reactor_worker (r, w)
@@ -193,7 +224,7 @@ feature -- Lifecycle Coordination
 		end
 
 	step (a_timeout_ms: INTEGER)
-			-- Single event loop tick and health monitoring cycle.
+			-- Single event loop tick and health monitoring cycle (used in tests and manual stepping).
 		require
 			running: is_running
 		do
@@ -201,7 +232,6 @@ feature -- Lifecycle Coordination
 				dispatch_reactor_step (r, a_timeout_ms)
 			end
 			check_health ({VR_REACTOR_BRIDGE}.c_reactor_now_ms)
-			{VR_REACTOR_BRIDGE}.c_sleep_ms (a_timeout_ms)
 		end
 
 	run_loop
@@ -209,11 +239,15 @@ feature -- Lifecycle Coordination
 		require
 			running: is_running
 		do
+			if attached reactor as r then
+				launch_reactor_loop (r)
+			end
 			from
 			until
 				not is_running or is_fatal_shutdown or {VR_REACTOR_BRIDGE}.c_reactor_is_shutting_down (reactor_handle) /= 0
 			loop
-				step (100)
+				check_health ({VR_REACTOR_BRIDGE}.c_reactor_now_ms)
+				{VR_REACTOR_BRIDGE}.c_sleep_ms (Supervisor_health_tick_ms)
 			end
 			if is_running then
 				stop_all
@@ -369,6 +403,9 @@ feature {NONE} -- Recovery Actions
 				-- 2. Create fresh worker instance
 				if attached broker as b then
 					create new_w.make (a_index, reactor_handle, b, worker_count)
+					if is_proxy_protocol_v2_enabled then
+						dispatch_worker_set_protocol (new_w, Proto_awaiting_proxy_v2)
+					end
 					workers.put (new_w, a_index)
 
 					-- 3. Hot-swap in broker & reactor
@@ -494,6 +531,12 @@ feature {NONE} -- Controlled SCOOP Helpers
 	launch_reactor_loop (a_reactor: separate VR_REACTOR)
 		do
 			a_reactor.run_loop
+		end
+
+	dispatch_worker_set_protocol (a_worker: separate VR_WORKER; a_proto: INTEGER)
+			-- Asynchronous command configuring worker initial protocol.
+		do
+			a_worker.set_protocol (a_proto)
 		end
 
 	set_child_state (a_id: STRING_8; a_state: INTEGER)

@@ -384,9 +384,16 @@ int main(void) {
     assert(vr_reactor_get_fd_owner(sup_r, s2) == -1);
     assert(vr_reactor_get_fd_owner(sup_r, s3) == 2);
 
-    /* Sockets s1 and s2 were closed by purge. s3 is closed manually. */
-    vr_reactor_del(sup_r, s3);
-    close(s3);
+    /* Sockets s1 and s2 were closed by purge. Calling close_fd_for_worker must safely fail without double-close */
+    assert(vr_reactor_close_fd_for_worker(sup_r, s1, 1) == -1);
+    assert(vr_reactor_close_fd_for_worker(sup_r, s2, 1) == -1);
+
+    /* s3 is owned by worker 2. Calling close_fd_for_worker with wrong worker (1) must fail */
+    assert(vr_reactor_close_fd_for_worker(sup_r, s3, 1) == -1);
+    assert(vr_reactor_get_fd_owner(sup_r, s3) == 2);
+    /* Calling close_fd_for_worker with correct worker (2) succeeds */
+    assert(vr_reactor_close_fd_for_worker(sup_r, s3, 2) == 0);
+    assert(vr_reactor_get_fd_owner(sup_r, s3) == -1);
 
     /* Test least-connections worker assignment & routing */
     assert(vr_reactor_get_worker_conns(sup_r, 0) == 0);
@@ -420,8 +427,55 @@ int main(void) {
     vr_reactor_release_worker_conn(sup_r, 0);
     assert(vr_reactor_get_worker_conns(sup_r, 0) == 1);
 
-    /* Untracked FD routing */
-    assert(vr_reactor_route_fd(sup_r, VR_MAX_TRACKED_FDS + 7, 4) == (VR_MAX_TRACKED_FDS + 7) % 4);
+    /* Untracked FD routing: assign_worker and route_fd MUST agree */
+    int untracked_fd = VR_MAX_TRACKED_FDS + 7;
+    int assigned_untracked = vr_reactor_assign_worker(sup_r, untracked_fd, 4);
+    assert(assigned_untracked == untracked_fd % 4);
+    assert(vr_reactor_route_fd(sup_r, untracked_fd, 4) == assigned_untracked);
+
+    /* 10. Testing Phase 8: PUB command parsing, msg ref, room sequences */
+    printf("[test_vr_reactor] 10. Testing PUB parsing, msg ref, and room sequences...\n");
+    int out_room = -1;
+    size_t out_offset = 0;
+
+    /* 10a. WebSocket PUB with explicit room */
+    const char pub1[] = "PUB 42 hello world";
+    assert(vr_ws_parse_pub_command(pub1, strlen(pub1), 0, &out_room, &out_offset) == 1);
+    assert(out_room == 42);
+    assert(out_offset == 7);
+    assert(memcmp(pub1 + out_offset, "hello world", 11) == 0);
+
+    /* 10b. WebSocket PUB with default room (no room integer) */
+    const char pub2[] = "PUB hello world";
+    assert(vr_ws_parse_pub_command(pub2, strlen(pub2), 0, &out_room, &out_offset) == 1);
+    assert(out_room == 0);
+    assert(out_offset == 4);
+    assert(memcmp(pub2 + out_offset, "hello world", 11) == 0);
+
+    /* 10c. SSE PUB with explicit room */
+    const char pub_sse1[] = "PUB_SSE 100 {\"temp\": 23.5}";
+    assert(vr_ws_parse_pub_command(pub_sse1, strlen(pub_sse1), 1, &out_room, &out_offset) == 1);
+    assert(out_room == 100);
+    assert(out_offset == 12);
+    assert(memcmp(pub_sse1 + out_offset, "{\"temp\": 23.5}", 14) == 0);
+
+    /* 10d. Non-pub command */
+    const char not_pub[] = "HELLO world";
+    assert(vr_ws_parse_pub_command(not_pub, strlen(not_pub), 0, &out_room, &out_offset) == 0);
+
+    /* 10e. Message ref counting */
+    vr_ws_msg_t *test_ref_msg = vr_ws_msg_create(1, "payload", 7, 1);
+    assert(test_ref_msg != NULL);
+    vr_ws_msg_ref(test_ref_msg);
+    /* Ref count is 2: first unref leaves it allocated, second frees */
+    vr_ws_msg_unref(test_ref_msg);
+    vr_ws_msg_unref(test_ref_msg);
+
+    /* 10f. Room sequence numbers */
+    assert(vr_reactor_next_room_seq(sup_r, 42) == 1ULL);
+    assert(vr_reactor_next_room_seq(sup_r, 42) == 2ULL);
+    assert(vr_reactor_next_room_seq(sup_r, 43) == 1ULL);
+    assert(vr_reactor_next_room_seq(sup_r, 42) == 3ULL);
 
     vr_reactor_destroy(sup_r);
 

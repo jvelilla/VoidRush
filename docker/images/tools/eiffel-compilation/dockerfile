@@ -1,0 +1,49 @@
+FROM debian:trixie
+LABEL description="Compilation and runtime environment for VoidRush (SCOOP & epoll reactor) on Linux"
+
+# Install build essentials, utilities, networking, and debugging tools
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --no-install-suggests \
+        ca-certificates curl \
+        bzip2 \
+        gcc make cmake libc6-dev \
+        git dos2unix vim \
+        locales \
+        valgrind gdb strace \
+        netcat-openbsd socat procps \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TERM=xterm-256color \
+    OUTPUT_NAME=voidrush
+
+ARG EIFFEL_DIR=/opt/eiffel-dist
+ARG HOME=/opt/eiffel
+
+ENV BIN_DIR=$HOME/bin \
+    SRC_DIR=$HOME/src \
+    EIFFEL_DIR=$EIFFEL_DIR \
+    BUILD_DIR=$HOME/build \
+    ISE_EIFFEL=$EIFFEL_DIR \
+    ISE_LIBRARY=$EIFFEL_DIR
+
+# The installer first: editing the entrypoint below then does not reinstall EiffelStudio
+COPY files/bin/install.sh files/bin/get_eiffel_env $BIN_DIR/
+RUN chmod 700 $BIN_DIR/* && dos2unix $BIN_DIR/*
+
+WORKDIR $HOME
+RUN echo "Installing EiffelStudio..." \
+    && $BIN_DIR/get_eiffel_env \
+    && . /opt/eiffel-dist/setup.rc \
+    && export ISE_LIBRARY=$ISE_EIFFEL \
+    && echo "Creating working directories..." \
+    && mkdir -p $SRC_DIR \
+    && mkdir -p $BUILD_DIR
+
+COPY files/bin/main $BIN_DIR/
+RUN chmod 700 $BIN_DIR/main && dos2unix $BIN_DIR/main
+
+ENTRYPOINT ["./bin/main"]
+CMD ["test"]

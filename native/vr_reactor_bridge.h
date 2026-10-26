@@ -33,7 +33,7 @@ _Static_assert(sizeof(vr_reactor_event_t) == 12, "vr_reactor_event_t must be 12 
 
 typedef struct vr_reactor vr_reactor_t;
 
-#define VR_MAX_WORKERS 64
+#define VR_MAX_WORKERS 63
 #define VR_MAX_TRACKED_FDS 65536
 
 /* Metrics Snapshot (Expanded to 136 bytes for Phase 7 supervision counters) */
@@ -143,10 +143,16 @@ struct vr_ws_msg {
 };
 typedef struct vr_ws_msg vr_ws_msg_t;
 
+#define VR_MAX_ROOMS 4096
+
 vr_ws_msg_t   *vr_ws_msg_create(uint8_t opcode, const void *payload, size_t len, int initial_refs);
 const uint8_t *vr_ws_msg_data(const vr_ws_msg_t *msg);
 size_t         vr_ws_msg_size(const vr_ws_msg_t *msg);
+void           vr_ws_msg_ref(vr_ws_msg_t *msg);
 void           vr_ws_msg_unref(vr_ws_msg_t *msg);
+int            vr_ws_is_valid_utf8(const unsigned char *s, size_t len);
+int            vr_ws_parse_pub_command(const char *data, size_t len, int is_sse, int *out_room, size_t *out_payload_offset);
+uint64_t       vr_reactor_next_room_seq(vr_reactor_t *r, int room_id);
 
 /* Phase 6: Server-Sent Events (SSE) Codec & Ref-Counted Broadcast */
 int vr_sse_format_event(
@@ -179,6 +185,7 @@ uint64_t vr_reactor_consume_fault_mask (vr_reactor_t *r);
 void     vr_reactor_set_fd_owner(vr_reactor_t *r, int fd, int16_t worker_id);
 int16_t  vr_reactor_get_fd_owner(const vr_reactor_t *r, int fd);
 int      vr_reactor_purge_worker_fds(vr_reactor_t *r, int worker_id);
+int      vr_reactor_close_fd_for_worker(vr_reactor_t *r, int fd, int worker_id);
 
 void     vr_reactor_metric_inc_restarts(vr_reactor_t *r);
 void     vr_reactor_metric_inc_isolated_faults(vr_reactor_t *r);

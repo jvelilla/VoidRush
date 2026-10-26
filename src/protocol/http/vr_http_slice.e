@@ -216,11 +216,11 @@ feature -- Comparison & Conversion
 
 	to_integer (buf: MANAGED_POINTER): INTEGER
 			-- Parse ASCII decimal integer represented by this slice.
-			-- Returns -1 if invalid or empty.
+			-- Returns -1 if invalid, empty, or on arithmetic overflow.
 		require
 			valid_buf: buf /= Void
 		local
-			i, val: INTEGER
+			i, val, d: INTEGER
 			c: CHARACTER
 			valid: BOOLEAN
 		do
@@ -238,7 +238,12 @@ feature -- Comparison & Conversion
 				loop
 					c := buf.read_character (offset + i)
 					if c >= '0' and c <= '9' then
-						val := (val * 10) + (c.code - ('0').code)
+						d := c.code - ('0').code
+						if val > ({INTEGER_32}.max_value - d) // 10 then
+							valid := False
+						else
+							val := (val * 10) + d
+						end
 					else
 						valid := False
 					end

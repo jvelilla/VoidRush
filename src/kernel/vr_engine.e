@@ -55,6 +55,24 @@ feature -- Configuration
 			supervisor.set_restart_intensity (a_max_restarts, a_window_ms)
 		end
 
+	set_bind_host (a_host: STRING_8)
+			-- Configure listening bind IP or hostname.
+		require
+			valid_host: a_host /= Void and then not a_host.is_empty
+		do
+			supervisor.set_bind_host (a_host)
+		ensure
+			host_set: attached supervisor.bind_host as h and then h.same_string (a_host)
+		end
+
+	enable_proxy_protocol_v2
+			-- Configure workers to expect HAProxy PROXY v2 binary header on incoming connections.
+		do
+			supervisor.enable_proxy_protocol_v2
+		ensure
+			proxy_v2_enabled: supervisor.is_proxy_protocol_v2_enabled
+		end
+
 feature -- Execution
 
 	start

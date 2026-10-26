@@ -1,0 +1,25 @@
+#!/bin/sh
+
+if [ -z "$EIFFEL_DIR" ]; then
+	EIFFEL_DIR=$HOME/eiffel-dist
+fi
+
+if [ ! -f "$EIFFEL_DIR/setup.rc" ]; then
+    echo "Installing EiffelStudio using local install.sh..."
+    bash "$(dirname "$0")/install.sh" --install-dir "$EIFFEL_DIR"
+fi
+
+if [ -f "$EIFFEL_DIR/setup.rc" ]; then
+	. "$EIFFEL_DIR/setup.rc"
+	export ISE_LIBRARY="$ISE_EIFFEL"
+	if [ -f "$HOME/.profile" ] && ! grep -q "setup.rc" "$HOME/.profile" 2>/dev/null; then
+		cat "$EIFFEL_DIR/setup.rc" >> "$HOME/.profile"
+		echo 'export ISE_LIBRARY="$ISE_EIFFEL"' >> "$HOME/.profile"
+	fi
+	if [ -f "$HOME/.bashrc" ] && ! grep -q "setup.rc" "$HOME/.bashrc" 2>/dev/null; then
+		echo ". $EIFFEL_DIR/setup.rc" >> "$HOME/.bashrc"
+		echo 'export ISE_LIBRARY="$ISE_EIFFEL"' >> "$HOME/.bashrc"
+	fi
+else
+	echo "Error: EiffelStudio setup.rc not found in $EIFFEL_DIR" >&2
+fi

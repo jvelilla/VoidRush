@@ -502,12 +502,60 @@ feature -- Phase 5 WebSocket Primitives
 			instance_free: class
 		end
 
+	c_ws_msg_ref (msg: POINTER)
+			-- Increment atomic reference counter for broadcast/replay buffers.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"vr_ws_msg_ref((vr_ws_msg_t *) $msg);"
+		ensure
+			instance_free: class
+		end
+
 	c_ws_msg_unref (msg: POINTER)
 			-- Decrement atomic reference counter, freeing memory when count reaches 0.
 		external
 			"C inline use %"vr_reactor_bridge.h%""
 		alias
 			"vr_ws_msg_unref((vr_ws_msg_t *) $msg);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_is_valid_utf8 (ptr: POINTER; len: INTEGER): BOOLEAN
+			-- Validate whether `len` bytes starting at `ptr` form valid UTF-8.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_BOOLEAN) vr_ws_is_valid_utf8((const unsigned char *) $ptr, (size_t) $len);"
+		ensure
+			instance_free: class
+		end
+
+	c_ws_parse_pub (ptr: POINTER; len: INTEGER; is_sse: BOOLEAN): NATURAL_64
+			-- Parse "PUB [room] <payload>" or "PUB_SSE [room] <payload>".
+			-- Returns packed (room_id |<< 32 | offset), or 0 if not a pub command.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"[
+				int room = 0;
+				size_t offset = 0;
+				if (vr_ws_parse_pub_command((const char *) $ptr, (size_t) $len, (int) $is_sse, &room, &offset)) {
+					return (((uint64_t)(uint32_t)room) << 32) | ((uint64_t)(uint32_t)offset);
+				}
+				return 0;
+			]"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_next_room_seq (r: POINTER; room_id: INTEGER): NATURAL_64
+			-- Atomically fetch and increment monotonic sequence counter for `room_id`.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_NATURAL_64) vr_reactor_next_room_seq((vr_reactor_t *) $r, (int) $room_id);"
 		ensure
 			instance_free: class
 		end
@@ -673,6 +721,17 @@ feature -- Phase 7 Supervision Heartbeats, Faults & Shard Purge
 			"C inline use %"vr_reactor_bridge.h%""
 		alias
 			"return (EIF_INTEGER) vr_reactor_purge_worker_fds((vr_reactor_t *) $r, (int) $worker_id);"
+		ensure
+			instance_free: class
+		end
+
+	c_reactor_close_fd_for_worker (r: POINTER; fd, worker_id: INTEGER): INTEGER
+			-- Atomically verify ownership and close socket `fd` if owned by `worker_id`.
+			-- Returns 0 on success, or -1 if socket was already purged or reassigned.
+		external
+			"C inline use %"vr_reactor_bridge.h%""
+		alias
+			"return (EIF_INTEGER) vr_reactor_close_fd_for_worker((vr_reactor_t *) $r, (int) $fd, (int) $worker_id);"
 		ensure
 			instance_free: class
 		end

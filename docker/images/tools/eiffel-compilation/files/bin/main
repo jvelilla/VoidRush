@@ -1,0 +1,181 @@
+#!/bin/sh
+set -e
+
+. "$BIN_DIR/get_eiffel_env"
+export ISE_LIBRARY="$ISE_EIFFEL"
+export TERM="${TERM:-xterm-256color}"
+
+SRC_DIR="${SRC_DIR:-/opt/eiffel/src}"
+BUILD_DIR="${BUILD_DIR:-/opt/eiffel/build}"
+ECF_PATH="$SRC_DIR/voidrush.ecf"
+NATIVE_DIR="$SRC_DIR/native"
+export ISE_PROJECT="$SRC_DIR"
+
+mkdir -p "$BUILD_DIR"
+
+compile_c() {
+    echo "============================================================"
+    echo "  Compiling VoidRush Native C Library (epoll bridge)..."
+    echo "============================================================"
+    if [ -f "$NATIVE_DIR/Makefile" ]; then
+        make -C "$NATIVE_DIR" all
+        if [ -f "$NATIVE_DIR/libvr_reactor_bridge.a" ]; then
+            cp "$NATIVE_DIR/libvr_reactor_bridge.a" "$BUILD_DIR/"
+        fi
+        if [ -f "$NATIVE_DIR/libreactor_bridge.a" ]; then
+            cp "$NATIVE_DIR/libreactor_bridge.a" "$BUILD_DIR/"
+        fi
+        if [ -f "$NATIVE_DIR/test_vr_reactor" ]; then
+            cp "$NATIVE_DIR/test_vr_reactor" "$BUILD_DIR/"
+        fi
+        if [ -f "$NATIVE_DIR/test_reactor" ]; then
+            cp "$NATIVE_DIR/test_reactor" "$BUILD_DIR/"
+        fi
+        echo "C compilation succeeded."
+    else
+        echo "Note: No Makefile found at $NATIVE_DIR/Makefile yet."
+    fi
+}
+
+run_c_test() {
+    echo "============================================================"
+    echo "  Running VoidRush Native C Tests..."
+    echo "============================================================"
+    if [ -f "$NATIVE_DIR/Makefile" ]; then
+        make -C "$NATIVE_DIR" test
+    elif [ -f "$BUILD_DIR/test_vr_reactor" ]; then
+        "$BUILD_DIR/test_vr_reactor"
+    elif [ -f "$BUILD_DIR/test_reactor" ]; then
+        "$BUILD_DIR/test_reactor"
+    else
+        echo "No C test binary or Makefile found yet."
+        return 1
+    fi
+}
+
+run_valgrind_c() {
+    echo "============================================================"
+    echo "  Running Valgrind on VoidRush Native C Tests..."
+    echo "============================================================"
+    compile_c
+    if [ -f "$BUILD_DIR/test_vr_reactor" ]; then
+        valgrind --leak-check=full --track-fds=yes --error-exitcode=1 "$BUILD_DIR/test_vr_reactor"
+    elif [ -f "$NATIVE_DIR/test_vr_reactor" ]; then
+        valgrind --leak-check=full --track-fds=yes --error-exitcode=1 "$NATIVE_DIR/test_vr_reactor"
+    elif [ -f "$BUILD_DIR/test_reactor" ]; then
+        valgrind --leak-check=full --track-fds=yes --error-exitcode=1 "$BUILD_DIR/test_reactor"
+    elif [ -f "$NATIVE_DIR/test_reactor" ]; then
+        valgrind --leak-check=full --track-fds=yes --error-exitcode=1 "$NATIVE_DIR/test_reactor"
+    else
+        echo "Error: test_vr_reactor binary not found."
+        return 1
+    fi
+}
+
+compile_eiffel() {
+    echo "============================================================"
+    echo "  Compiling VoidRush Eiffel Server on Linux..."
+    echo "============================================================"
+    if [ ! -f "$ECF_PATH" ]; then
+        echo "Error: ECF file not found at $ECF_PATH"
+        return 1
+    fi
+    (cd "$SRC_DIR" && ecb -batch -config "$ECF_PATH" -target voidrush -finalize -keep -c_compile)
+    cp "$SRC_DIR/EIFGENs/voidrush/F_code/voidrush" "$BUILD_DIR/voidrush"
+    echo "Compilation succeeded: $BUILD_DIR/voidrush"
+}
+
+compile_tests() {
+    echo "============================================================"
+    echo "  Compiling VoidRush Eiffel Test Suite on Linux..."
+    echo "============================================================"
+    if [ ! -f "$ECF_PATH" ]; then
+        echo "Error: ECF file not found at $ECF_PATH"
+        return 1
+    fi
+    (cd "$SRC_DIR" && ecb -batch -config "$ECF_PATH" -target voidrush_tests -finalize -keep -c_compile)
+    cp "$SRC_DIR/EIFGENs/voidrush_tests/F_code/voidrush" "$BUILD_DIR/voidrush_tests"
+    echo "Compilation succeeded: $BUILD_DIR/voidrush_tests"
+}
+
+compile_example() {
+    echo "============================================================"
+    echo "  Compiling VoidRush Telemetry Example on Linux..."
+    echo "============================================================"
+    if [ ! -f "$ECF_PATH" ]; then
+        echo "Error: ECF file not found at $ECF_PATH"
+        return 1
+    fi
+    (cd "$SRC_DIR" && ecb -batch -config "$ECF_PATH" -target voidrush_example -finalize -keep -c_compile)
+    cp "$SRC_DIR/EIFGENs/voidrush_example/F_code/voidrush" "$BUILD_DIR/voidrush_example"
+    echo "Compilation succeeded: $BUILD_DIR/voidrush_example"
+}
+
+run_eiffel_tests() {
+    if [ ! -f "$BUILD_DIR/voidrush_tests" ]; then
+        compile_tests
+    fi
+    echo "============================================================"
+    echo "  Running VoidRush Eiffel Test Suite on Linux..."
+    echo "============================================================"
+    "$BUILD_DIR/voidrush_tests"
+}
+
+case "$1" in
+    ""|"test")
+        # Run C tests if available
+        if [ -f "$NATIVE_DIR/Makefile" ]; then
+            run_c_test
+        fi
+        # Run Eiffel tests if ECF exists
+        if [ -f "$ECF_PATH" ]; then
+            echo ""
+            compile_tests
+            echo ""
+            "$BUILD_DIR/voidrush_tests"
+        fi
+        ;;
+    "c-test")
+        run_c_test
+        ;;
+    "compile-c")
+        compile_c
+        ;;
+    "valgrind"|"valgrind-c")
+        run_valgrind_c
+        ;;
+    "compile-eiffel"|"compile-server")
+        compile_eiffel
+        ;;
+    "compile-tests")
+        compile_tests
+        ;;
+    "compile-example")
+        compile_example
+        ;;
+    "compile"|"compile-all")
+        compile_c
+        if [ -f "$ECF_PATH" ]; then
+            compile_eiffel
+            compile_tests
+            compile_example
+        fi
+        ;;
+    "run"|"server")
+        if [ ! -f "$BUILD_DIR/voidrush" ]; then
+            compile_eiffel
+        fi
+        echo "Launching VoidRush Server on Linux..."
+        exec "$BUILD_DIR/voidrush"
+        ;;
+    "example")
+        if [ ! -f "$BUILD_DIR/voidrush_example" ]; then
+            compile_example
+        fi
+        echo "Launching VoidRush Telemetry Example on Linux..."
+        exec "$BUILD_DIR/voidrush_example"
+        ;;
+    *)
+        exec "$@"
+        ;;
+esac

@@ -25,6 +25,7 @@ feature {NONE} -- Initialization
 			create accept_slice.make_empty
 			create last_event_id_slice.make_empty
 			create scratch_val_slice.make_empty
+			create scratch_name_slice.make_empty
 			reset
 		ensure
 			reset_done: method = Method_unknown and header_bytes_consumed = 0
@@ -114,6 +115,75 @@ feature -- Access
 			           path_slice.same_as_string (buf, "/publish"))
 		end
 
+	query_room_id (buf: MANAGED_POINTER): INTEGER
+			-- Extract integer room ID from query string (e.g. ?room=42 or ?foo=1&room=42).
+			-- Returns Room_default (0) if parameter is absent or non-numeric.
+		require
+			valid_buf: buf /= Void
+		local
+			pos, end_pos, digit_val: INTEGER
+			found: BOOLEAN
+			val: INTEGER_64
+			c: CHARACTER
+		do
+			Result := Room_default
+			if not query_slice.is_empty then
+				pos := query_slice.offset
+				end_pos := query_slice.offset + query_slice.length
+				from
+				until
+					pos >= end_pos or found
+				loop
+					if pos + 5 <= end_pos and then
+					   buf.read_character (pos) = 'r' and then
+					   buf.read_character (pos + 1) = 'o' and then
+					   buf.read_character (pos + 2) = 'o' and then
+					   buf.read_character (pos + 3) = 'm' and then
+					   buf.read_character (pos + 4) = '=' then
+						val := 0
+						from
+							pos := pos + 5
+						until
+							pos >= end_pos or else buf.read_character (pos) = '&'
+						loop
+							c := buf.read_character (pos)
+							if c >= '0' and c <= '9' then
+								digit_val := c.code - ('0').code
+								if val <= 214748364 then
+									val := val * 10 + digit_val
+								end
+							else
+								pos := end_pos
+							end
+							pos := pos + 1
+						end
+						if val >= 0 and val <= 2147483647 then
+							Result := val.to_integer_32
+							found := True
+						end
+					else
+						from
+						until
+							pos >= end_pos or else buf.read_character (pos) = '&'
+						loop
+							pos := pos + 1
+						end
+						if pos < end_pos and then buf.read_character (pos) = '&' then
+							pos := pos + 1
+						end
+					end
+				end
+			end
+		ensure
+			valid_room: Result >= 0
+		end
+
+	has_transfer_encoding: BOOLEAN
+			-- Was a Transfer-Encoding header detected in the request?
+
+	is_content_length_invalid: BOOLEAN
+			-- Was Content-Length present but malformed, negative, or overflowing?
+
 feature -- State Management
 
 	reset
@@ -131,6 +201,9 @@ feature -- State Management
 			ws_key_slice.reset
 			accept_slice.reset
 			last_event_id_slice.reset
+			scratch_name_slice.reset
+			has_transfer_encoding := False
+			is_content_length_invalid := False
 			ws_version := 0
 			version_minor := 1
 			is_keep_alive := True
@@ -141,6 +214,8 @@ feature -- State Management
 			method_cleared: method = Method_unknown
 			consumed_cleared: header_bytes_consumed = 0
 			watermark_cleared: scan_watermark = 0
+			transfer_encoding_cleared: not has_transfer_encoding
+			content_length_invalid_cleared: not is_content_length_invalid
 		end
 
 feature -- Parsing
@@ -391,76 +466,59 @@ feature {NONE} -- Token Extraction
 			-- Classify header at `name_offset` and record its value window.
 			-- Retained values are copied by offset/length (never by reference) into their dedicated slices.
 		local
-			name_len: INTEGER
-			v_slice: VR_HTTP_SLICE
+			name_len, parsed_len: INTEGER
+			v_slice, n_slice: VR_HTTP_SLICE
 		do
 			name_len := colon_offset - name_offset
+			n_slice := scratch_name_slice
+			n_slice.set (name_offset, name_len)
 			v_slice := scratch_val_slice
 			v_slice.set (val_offset, val_len)
 
-			-- Check "content-length" (14 chars)
-			if name_len = 14 and then
-			   (buf.read_character (name_offset) = 'C' or buf.read_character (name_offset) = 'c') and then
-			   (buf.read_character (name_offset + 8) = 'L' or buf.read_character (name_offset + 8) = 'l') then
-				content_length := v_slice.to_integer (buf).max (0)
-			-- Check "connection" (10 chars)
-			elseif name_len = 10 and then
-			       (buf.read_character (name_offset) = 'C' or buf.read_character (name_offset) = 'c') and then
-			       (buf.read_character (name_offset + 1) = 'O' or buf.read_character (name_offset + 1) = 'o') then
-				if v_slice.same_as_string (buf, "close") or v_slice.same_as_string (buf, "Close") then
+			if n_slice.same_as_string_case_insensitive (buf, "content-length") then
+				parsed_len := v_slice.to_integer (buf)
+				if parsed_len < 0 then
+					is_content_length_invalid := True
+				else
+					content_length := parsed_len
+				end
+			elseif n_slice.same_as_string_case_insensitive (buf, "transfer-encoding") then
+				has_transfer_encoding := True
+			elseif n_slice.same_as_string_case_insensitive (buf, "connection") then
+				if v_slice.same_as_string_case_insensitive (buf, "close") then
 					is_keep_alive := False
-				elseif v_slice.same_as_string (buf, "keep-alive") or v_slice.same_as_string (buf, "Keep-Alive") then
+				elseif v_slice.same_as_string_case_insensitive (buf, "keep-alive") then
 					is_keep_alive := True
 				end
 				if v_slice.has_substring_case_insensitive (buf, "upgrade") then
 					is_connection_upgrade := True
 				end
-			-- Check "upgrade" (7 chars)
-			elseif name_len = 7 and then
-			       (buf.read_character (name_offset) = 'U' or buf.read_character (name_offset) = 'u') and then
-			       (buf.read_character (name_offset + 1) = 'P' or buf.read_character (name_offset + 1) = 'p') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "upgrade") then
 				if v_slice.same_as_string_case_insensitive (buf, "websocket") then
 					is_upgrade_websocket := True
 				end
-			-- Check "sec-websocket-key" (17 chars)
-			elseif name_len = 17 and then
-			       (buf.read_character (name_offset) = 'S' or buf.read_character (name_offset) = 's') and then
-			       (buf.read_character (name_offset + 14) = 'K' or buf.read_character (name_offset + 14) = 'k') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "sec-websocket-key") then
 				ws_key_slice.set (val_offset, val_len)
-			-- Check "sec-websocket-version" (21 chars)
-			elseif name_len = 21 and then
-			       (buf.read_character (name_offset) = 'S' or buf.read_character (name_offset) = 's') and then
-			       (buf.read_character (name_offset + 14) = 'V' or buf.read_character (name_offset + 14) = 'v') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "sec-websocket-version") then
 				ws_version := v_slice.to_integer (buf)
-			-- Check "host" (4 chars)
-			elseif name_len = 4 and then
-			       (buf.read_character (name_offset) = 'H' or buf.read_character (name_offset) = 'h') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "host") then
 				host_slice.set (val_offset, val_len)
-			-- Check "x-forwarded-for" (15 chars)
-			elseif name_len = 15 and then
-			       (buf.read_character (name_offset) = 'X' or buf.read_character (name_offset) = 'x') and then
-			       (buf.read_character (name_offset + 12) = 'F' or buf.read_character (name_offset + 12) = 'f') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "x-forwarded-for") then
 				x_forwarded_for_slice.set (val_offset, val_len)
-			-- Check "x-forwarded-proto" (17 chars)
-			elseif name_len = 17 and then
-			       (buf.read_character (name_offset) = 'X' or buf.read_character (name_offset) = 'x') and then
-			       (buf.read_character (name_offset + 12) = 'P' or buf.read_character (name_offset + 12) = 'p') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "x-forwarded-proto") then
 				x_forwarded_proto_slice.set (val_offset, val_len)
-			-- Check "accept" (6 chars)
-			elseif name_len = 6 and then
-			       (buf.read_character (name_offset) = 'A' or buf.read_character (name_offset) = 'a') and then
-			       (buf.read_character (name_offset + 1) = 'C' or buf.read_character (name_offset + 1) = 'c') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "accept") then
 				accept_slice.set (val_offset, val_len)
-			-- Check "last-event-id" (13 chars)
-			elseif name_len = 13 and then
-			       (buf.read_character (name_offset) = 'L' or buf.read_character (name_offset) = 'l') and then
-			       (buf.read_character (name_offset + 5) = 'E' or buf.read_character (name_offset + 5) = 'e') then
+			elseif n_slice.same_as_string_case_insensitive (buf, "last-event-id") then
 				last_event_id_slice.set (val_offset, val_len)
 			end
 		end
 
 	scratch_val_slice: VR_HTTP_SLICE
 			-- Reusable header-value window used for transient comparisons (never retained)
+
+	scratch_name_slice: VR_HTTP_SLICE
+			-- Reusable header-name window used for transient comparisons (never retained)
 
 invariant
 	valid_method: method >= Method_unknown and method <= Method_options

@@ -240,10 +240,76 @@ size_t vr_ws_msg_size(const vr_ws_msg_t *msg) {
     return msg ? msg->total_len : 0;
 }
 
+void vr_ws_msg_ref(vr_ws_msg_t *msg) {
+    if (msg) {
+        __atomic_add_fetch(&msg->ref_count, 1, __ATOMIC_RELAXED);
+    }
+}
+
 void vr_ws_msg_unref(vr_ws_msg_t *msg) {
     if (msg) {
         if (__atomic_sub_fetch(&msg->ref_count, 1, __ATOMIC_ACQ_REL) == 0) {
             free(msg);
         }
     }
+}
+
+int vr_ws_parse_pub_command(const char *data, size_t len, int is_sse, int *out_room, size_t *out_payload_offset) {
+    if (!data || !out_room || !out_payload_offset) return 0;
+    const char *prefix = is_sse ? "PUB_SSE " : "PUB ";
+    size_t prefix_len = is_sse ? 8 : 4;
+
+    if (len < prefix_len) return 0;
+    if (memcmp(data, prefix, prefix_len) != 0) return 0;
+
+    size_t p = prefix_len;
+    /* Check for optional integer room parameter: digits followed by space */
+    if (p < len && data[p] >= '0' && data[p] <= '9') {
+        int room = 0;
+        while (p < len && data[p] >= '0' && data[p] <= '9') {
+            int d = data[p] - '0';
+            if (room <= 214748364) {
+                room = room * 10 + d;
+            }
+            p++;
+        }
+        if (p < len && data[p] == ' ') {
+            while (p < len && data[p] == ' ') {
+                p++;
+            }
+            *out_room = room;
+            *out_payload_offset = p;
+            return 1;
+        }
+    }
+
+    *out_room = 0; /* Default room */
+    *out_payload_offset = prefix_len;
+    return 1;
+}
+
+int vr_ws_is_valid_utf8(const unsigned char *s, size_t len) {
+    if (!s) return 1;
+    size_t i = 0;
+    while (i < len) {
+        if (s[i] <= 0x7F) {
+            i++;
+        } else if ((s[i] & 0xE0) == 0xC0) {
+            if (i + 1 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i] & 0x1E) == 0) return 0;
+            i += 2;
+        } else if ((s[i] & 0xF0) == 0xE0) {
+            if (i + 2 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i + 2] & 0xC0) != 0x80) return 0;
+            unsigned int cp = ((s[i] & 0x0F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F);
+            if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+            i += 3;
+        } else if ((s[i] & 0xF8) == 0xF0) {
+            if (i + 3 >= len || (s[i + 1] & 0xC0) != 0x80 || (s[i + 2] & 0xC0) != 0x80 || (s[i + 3] & 0xC0) != 0x80) return 0;
+            unsigned int cp = ((s[i] & 0x07) << 18) | ((s[i + 1] & 0x3F) << 12) | ((s[i + 2] & 0x3F) << 6) | (s[i + 3] & 0x3F);
+            if (cp < 0x10000 || cp > 0x10FFFF) return 0;
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
 }

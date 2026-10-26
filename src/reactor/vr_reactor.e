@@ -9,7 +9,8 @@ inherit
 
 create
 	make,
-	make_with_components
+	make_with_components,
+	make_with_host
 
 feature {NONE} -- Initialization
 
@@ -62,8 +63,26 @@ feature {NONE} -- Initialization
 			valid_handle: a_handle /= default_pointer
 			valid_worker_count: a_worker_count > 0
 			valid_broker: a_broker /= Void
+		do
+			make_with_host (Void, a_port, a_handle, a_worker_count, a_broker)
+		ensure
+			is_open: is_open
+			is_listening: is_listening
+			broker_set: broker = a_broker
+		end
+
+	make_with_host (a_host: detachable separate READABLE_STRING_8; a_port: INTEGER; a_handle: POINTER; a_worker_count: INTEGER; a_broker: separate VR_BROKER)
+			-- Initialize reactor with specific bind host and externally managed components.
+		require
+			valid_port: a_port > 0 and a_port <= 65535
+			valid_handle: a_handle /= default_pointer
+			valid_worker_count: a_worker_count > 0
+			valid_broker: a_broker /= Void
 		local
 			res: INTEGER
+			c_host: ANY
+			host_ptr: POINTER
+			bh: STRING_8
 		do
 			handle := a_handle
 			worker_count := a_worker_count
@@ -72,7 +91,16 @@ feature {NONE} -- Initialization
 			is_externally_owned := True
 			create events.make (Max_events)
 
-			listen_fd := {VR_REACTOR_BRIDGE}.c_listen_tcp (default_pointer, a_port, Default_backlog)
+			if attached a_host as h and then not h.is_empty then
+				create bh.make_from_separate (h)
+				bind_host := bh
+				c_host := bh.to_c
+				host_ptr := $c_host
+			else
+				host_ptr := default_pointer
+			end
+
+			listen_fd := {VR_REACTOR_BRIDGE}.c_listen_tcp (host_ptr, a_port, Default_backlog)
 			check listen_ok: listen_fd >= 0 end
 
 			-- Generation 0 is reserved exclusively for the listening socket
@@ -85,6 +113,9 @@ feature {NONE} -- Initialization
 			is_listening: is_listening
 			broker_set: broker = a_broker
 		end
+
+	bind_host: detachable STRING_8
+			-- Configured bind IP address or hostname
 
 feature -- Registration
 
